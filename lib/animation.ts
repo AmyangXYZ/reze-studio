@@ -1,20 +1,8 @@
-// ─── Math types ──────────────────────────────────────────────────────────
-export class Vec3 {
-  constructor(
-    public x = 0,
-    public y = 0,
-    public z = 0,
-  ) {}
-}
+import { Vec3, Quat } from "reze-engine"
+import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
 
-export class Quat {
-  constructor(
-    public x = 0,
-    public y = 0,
-    public z = 0,
-    public w = 1,
-  ) {}
-}
+export { Vec3, Quat }
+export type { AnimationClip, BoneKeyframe, MorphKeyframe }
 
 // Quat → Euler YXZ (degrees) — matches MMD convention
 export function quatToEuler(q: Quat) {
@@ -72,46 +60,29 @@ export function bezierY(cp0: { x: number; y: number }, cp1: { x: number; y: numb
   return 3 * (1 - mid) ** 2 * mid * y1 + 3 * (1 - mid) * mid ** 2 * y2 + mid ** 3
 }
 
-// ─── Types ───────────────────────────────────────────────────────────────
-export interface InterpPoint {
-  x: number
-  y: number
-}
-
-export interface KeyframeInterpolation {
-  rotation: [InterpPoint, InterpPoint]
-  translationX: [InterpPoint, InterpPoint]
-  translationY: [InterpPoint, InterpPoint]
-  translationZ: [InterpPoint, InterpPoint]
-}
-
-export interface BoneKeyframe {
-  frame: number
-  rotation: Quat
-  translation: Vec3
-  interpolation: KeyframeInterpolation
-}
-
-export interface AnimationClip {
-  boneTracks: Map<string, BoneKeyframe[]>
-  morphTracks: Map<string, unknown[]>
-  frameCount: number
-}
-
 // ─── Constants ───────────────────────────────────────────────────────────
 export const DOPE_H = 34
-export const RULER_H = 22
+/** Frame ruler height (px); keep in sync with tick/label layout in timeline canvas draw. */
+export const RULER_H = 17
 export const LABEL_W = 52
 export const DOT_R = 3.5
 export const DIAMOND = 5
 export const MIN_PX = 2
 export const MAX_PX = 20
 
+/** Max zoom-out (min px/frame) for a given track width: show 0…frameCount inside [LABEL_W, width]. */
+export function minPxPerFrameForViewport(trackWidthPx: number, frameCount: number): number {
+  if (frameCount <= 0 || trackWidthPx <= LABEL_W + 1) return MIN_PX
+  const fit = (trackWidthPx - LABEL_W) / frameCount
+  return Math.min(MIN_PX, Math.max(0.01, fit))
+}
+
 export const C = {
   bg: "#0d0d11",
   curveBg: "#101016",
   ruler: "#0a0a0d",
-  rulerText: "#55555f",
+  // Align with shadcn `muted-foreground` (~ oklch(0.708)) — no near-white UI text.
+  rulerText: "#9ca3af",
   rulerTick: "#2a2a34",
   rulerMajor: "#3a3a48",
   grid: "#161620",
@@ -120,24 +91,26 @@ export const C = {
   playhead: "#d83838",
   playheadGlow: "rgba(216,56,56,0.18)",
   diamondSel: "#5aa0f0",
+  keyDotSel: "#9ca3af",
   dopeBg: "#0e0e12",
   dopeBorder: "#222230",
-  dopeLabel: "#55555f",
-  dopeLabelNum: "#444450",
+  dopeLabel: "#9ca3af",
+  dopeLabelNum: "#6b7280",
   rotX: "#e25555",
   rotY: "#44bb55",
   rotZ: "#4477dd",
   traX: "#e2a055",
   traY: "#55bba0",
   traZ: "#7755dd",
-  label: "#666672",
+  label: "#9ca3af",
   tabBg: "#18181e",
   tabActive: "#2a2a36",
-  tabText: "#606068",
-  tabTextActive: "#ccccdd",
+  tabText: "#9ca3af",
+  tabTextActive: "#9ca3af",
+  toolbarOnAccent: "#0f0f12",
   border: "#222230",
   frameBadge: "#1a1a22",
-  frameBadgeText: "#77778a",
+  frameBadgeText: "#9ca3af",
   sidebarBg: "#111116",
   sidebarGroup: "#888898",
   sidebarBone: "#666672",
@@ -151,8 +124,224 @@ export const FONT = "'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',mono
 // ─── Bone groups ─────────────────────────────────────────────────────────
 export const BONE_GROUPS: Record<string, string[] | null> = {
   "All Bones": null,
-  "Upper Body": ["首", "頭", "上半身"],
-  "Lower Body": ["左ひざ", "右ひざ", "下半身"],
+  "Upper Body": ["頭", "首", "上半身", "上半身2", "胸", "首根元", "head", "neck", "upper body"],
+  "Left Arm": [
+    "左肩",
+    "左腕",
+    "左ひじ",
+    "左手首",
+    "左腕捩",
+    "左手捩",
+    "左肩P",
+    "左腕P",
+    "左ひじP",
+    "left shoulder",
+    "left upper arm",
+    "left elbow",
+    "left wrist",
+    "left arm twist",
+    "left wrist twist",
+  ],
+  "Right Arm": [
+    "右肩",
+    "右腕",
+    "右ひじ",
+    "右手首",
+    "右腕捩",
+    "右手捩",
+    "右肩P",
+    "右腕P",
+    "右ひじP",
+    "right shoulder",
+    "right upper arm",
+    "right elbow",
+    "right wrist",
+    "right arm twist",
+    "right wrist twist",
+  ],
+  "Lower Body": [
+    "下半身",
+    "左足",
+    "右足",
+    "左ひざ",
+    "右ひざ",
+    "左足首",
+    "右足首",
+    "左つま先",
+    "右つま先",
+    "センター",
+    "グルーブ",
+    "左足ＩＫ",
+    "右足ＩＫ",
+    "left leg",
+    "right leg",
+    "left knee",
+    "right knee",
+    "left ankle",
+    "right ankle",
+    "left toe",
+    "right toe",
+    "lower body",
+  ],
+}
+
+/** English labels for known bone names (JP + common aliases); used for `首 (Neck)` style UI. */
+export const BONE_NAME_EN: Record<string, string> = {
+  頭: "Head",
+  首: "Neck",
+  上半身: "Upper body",
+  上半身2: "Upper body 2",
+  胸: "Chest",
+  首根元: "Neck root",
+  head: "Head",
+  neck: "Neck",
+  "upper body": "Upper body",
+  左肩: "Left shoulder",
+  左腕: "Left upper arm",
+  左ひじ: "Left elbow",
+  左手首: "Left wrist",
+  左腕捩: "Left arm twist",
+  左手捩: "Left wrist twist",
+  左肩P: "Left shoulder (P)",
+  左腕P: "Left upper arm (P)",
+  左ひじP: "Left elbow (P)",
+  "left shoulder": "Left shoulder",
+  "left upper arm": "Left upper arm",
+  "left elbow": "Left elbow",
+  "left wrist": "Left wrist",
+  "left arm twist": "Left arm twist",
+  "left wrist twist": "Left wrist twist",
+  右肩: "Right shoulder",
+  右腕: "Right upper arm",
+  右ひじ: "Right elbow",
+  右手首: "Right wrist",
+  右腕捩: "Right arm twist",
+  右手捩: "Right wrist twist",
+  右肩P: "Right shoulder (P)",
+  右腕P: "Right upper arm (P)",
+  右ひじP: "Right elbow (P)",
+  "right shoulder": "Right shoulder",
+  "right upper arm": "Right upper arm",
+  "right elbow": "Right elbow",
+  "right wrist": "Right wrist",
+  "right arm twist": "Right arm twist",
+  "right wrist twist": "Right wrist twist",
+  下半身: "Lower body",
+  左足: "Left leg",
+  右足: "Right leg",
+  左ひざ: "Left knee",
+  右ひざ: "Right knee",
+  左足首: "Left ankle",
+  右足首: "Right ankle",
+  左つま先: "Left toe",
+  右つま先: "Right toe",
+  センター: "Center",
+  グルーブ: "Groove",
+  左足ＩＫ: "Left leg IK",
+  右足ＩＫ: "Right leg IK",
+  左足IK: "Left leg IK",
+  右足IK: "Right leg IK",
+  "left leg": "Left leg",
+  "right leg": "Right leg",
+  "left knee": "Left knee",
+  "right knee": "Right knee",
+  "left ankle": "Left ankle",
+  "right ankle": "Right ankle",
+  "left toe": "Left toe",
+  "right toe": "Right toe",
+  "lower body": "Lower body",
+
+  左目: "Left eye",
+  右目: "Right eye",
+  両目: "Both eyes",
+
+  左親指１: "Left thumb 1",
+  左親指２: "Left thumb 2",
+  左親指３: "Left thumb 3",
+  左人指１: "Left index 1",
+  左人指２: "Left index 2",
+  左人指３: "Left index 3",
+  左中指１: "Left middle 1",
+  左中指２: "Left middle 2",
+  左中指３: "Left middle 3",
+  左薬指１: "Left ring 1",
+  左薬指２: "Left ring 2",
+  左薬指３: "Left ring 3",
+  左小指１: "Left little 1",
+  左小指２: "Left little 2",
+  左小指３: "Left little 3",
+  右親指１: "Right thumb 1",
+  右親指２: "Right thumb 2",
+  右親指３: "Right thumb 3",
+  右人指１: "Right index 1",
+  右人指２: "Right index 2",
+  右人指３: "Right index 3",
+  右中指１: "Right middle 1",
+  右中指２: "Right middle 2",
+  右中指３: "Right middle 3",
+  右薬指１: "Right ring 1",
+  右薬指２: "Right ring 2",
+  右薬指３: "Right ring 3",
+  右小指１: "Right little 1",
+  右小指２: "Right little 2",
+  右小指３: "Right little 3",
+
+  左腕捩１: "Left arm twist 1",
+  左腕捩２: "Left arm twist 2",
+  左腕捩３: "Left arm twist 3",
+  右腕捩１: "Right arm twist 1",
+  右腕捩２: "Right arm twist 2",
+  右腕捩３: "Right arm twist 3",
+
+  左つま先ＩＫ: "Left toe IK",
+  右つま先ＩＫ: "Right toe IK",
+  左つま先IK: "Left toe IK",
+  右つま先IK: "Right toe IK",
+
+  左手先: "Left hand tip",
+  右手先: "Right hand tip",
+  左親指先: "Left thumb tip",
+  右親指先: "Right thumb tip",
+  左人指先: "Left index tip",
+  右人指先: "Right index tip",
+  左中指先: "Left middle tip",
+  右中指先: "Right middle tip",
+  左薬指先: "Left ring tip",
+  右薬指先: "Right ring tip",
+  左小指先: "Left little tip",
+  右小指先: "Right little tip",
+  両目先: "Both eyes target",
+}
+
+function boneNameLookupVariants(name: string): string[] {
+  const v: string[] = [name]
+  const fw = name.replace(/[0-9]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x30 + 0xff10))
+  if (fw !== name) v.push(fw)
+  const hw = name.replace(/[\uFF10-\uFF19]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xff10 + 0x30))
+  if (hw !== name) v.push(hw)
+  if (name.includes("ＩＫ")) v.push(name.replace(/ＩＫ/g, "IK"))
+  if (name.includes("IK")) v.push(name.replace(/IK/g, "ＩＫ"))
+  return v
+}
+
+function boneEnglishLookup(boneName: string): string | undefined {
+  for (const key of boneNameLookupVariants(boneName)) {
+    const hit = BONE_NAME_EN[key]
+    if (hit) return hit
+  }
+  const lower = boneName.toLowerCase()
+  for (const [k, v] of Object.entries(BONE_NAME_EN)) {
+    if (k.toLowerCase() === lower) return v
+  }
+  return undefined
+}
+
+export function boneDisplayLabel(boneName: string): string {
+  const en = boneEnglishLookup(boneName)
+  if (!en) return boneName
+  const hasJp = /[\u3040-\u30ff\u4e00-\u9fff]/.test(boneName)
+  if (!hasJp && boneName.toLowerCase().trim() === en.toLowerCase().trim()) return boneName
+  return `${boneName} (${en})`
 }
 
 // ─── Channel definitions ─────────────────────────────────────────────────
@@ -249,7 +438,7 @@ export function getAxisConfig(tab: string) {
   if (isRot) {
     return { min: -90, max: 90, unit: "°", side: "left" as const, step: 30, subStep: 15 }
   } else {
-    return { min: -5, max: 20, unit: "", side: "right" as const, step: 5, subStep: 2.5 }
+    return { min: -5, max: 20, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
   }
 }
 
@@ -282,6 +471,7 @@ export function makeMockClip(): AnimationClip {
     boneTracks.set(
       name,
       kf.map((f) => ({
+        boneName: name,
         frame: f,
         rotation: eulerToQuat(
           Math.sin(f * 0.08 + i) * 25,
@@ -297,19 +487,19 @@ export function makeMockClip(): AnimationClip {
           rotation: [
             { x: 20 + Math.floor(Math.sin(i * 1.1) * 35), y: 20 + Math.floor(Math.cos(i * 1.3) * 35) },
             { x: 107 - Math.floor(Math.sin(i * 1.1) * 35), y: 107 - Math.floor(Math.cos(i * 1.3) * 35) },
-          ] as [InterpPoint, InterpPoint],
+          ],
           translationX: [
             { x: 20, y: 20 },
             { x: 107, y: 107 },
-          ] as [InterpPoint, InterpPoint],
+          ],
           translationY: [
             { x: 20, y: 20 },
             { x: 107, y: 107 },
-          ] as [InterpPoint, InterpPoint],
+          ],
           translationZ: [
             { x: 20, y: 20 },
             { x: 107, y: 107 },
-          ] as [InterpPoint, InterpPoint],
+          ],
         },
       })),
     )

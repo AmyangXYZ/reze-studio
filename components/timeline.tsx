@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback } from "react"
+import { useState, useRef, useEffect, useCallback, useMemo } from "react"
+import { ZoomIn, ZoomOut } from "lucide-react"
 import {
   type AnimationClip,
   type BoneKeyframe,
@@ -11,9 +12,10 @@ import {
   LABEL_W,
   DOT_R,
   DIAMOND,
-  MIN_PX,
   MAX_PX,
+  minPxPerFrameForViewport,
   TABS,
+  boneDisplayLabel,
   getChannelsForTab,
   getAxisConfig,
   bezierY,
@@ -26,6 +28,149 @@ export interface SelectedKeyframe {
   frame: number
   channel?: string
   type: "dope" | "curve"
+}
+
+// Zoom: muted track/ring (shadcn muted-foreground family, not white).
+const ZOOM_TRACK = "rgba(156,163,175,0.2)"
+const ZOOM_RING = "rgba(156,163,175,0.5)"
+
+function ZoomRuler({
+  min,
+  max,
+  value,
+  onChange,
+}: {
+  min: number
+  max: number
+  value: number
+  onChange: (v: number) => void
+}) {
+  const trackRef = useRef<HTMLDivElement>(null)
+  const dragging = useRef(false)
+  const span = max - min
+
+  const setFromClientX = useCallback(
+    (clientX: number) => {
+      const el = trackRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const s = max - min
+      const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+      if (s <= 0) {
+        onChange(min)
+        return
+      }
+      const raw = min + t * s
+      const snap = (v: number) => (s < 2 ? Math.round(v * 100) / 100 : Math.round(v * 2) / 2)
+      onChange(Math.max(min, Math.min(max, snap(raw))))
+    },
+    [min, max, onChange],
+  )
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!dragging.current) return
+      setFromClientX(e.clientX)
+    }
+    const onUp = () => {
+      dragging.current = false
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+    window.addEventListener("pointercancel", onUp)
+    return () => {
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      window.removeEventListener("pointercancel", onUp)
+    }
+  }, [setFromClientX])
+
+  const pct = span > 0 ? ((value - min) / span) * 100 : 50
+  const snapVal = (v: number) => (span < 2 ? Math.round(v * 100) / 100 : Math.round(v * 2) / 2)
+  const nudgeDelta = span < 2 ? 0.05 : 0.5
+  const nudge = (dir: -1 | 1) =>
+    onChange(Math.max(min, Math.min(max, snapVal(value + dir * nudgeDelta))))
+
+  return (
+    <div
+      className="flex shrink-0 items-center gap-1 select-none text-muted-foreground"
+      style={{ userSelect: "none" }}
+    >
+      <button
+        type="button"
+        aria-label="Zoom out"
+        className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded border-0 bg-transparent p-0"
+        onClick={() => nudge(-1)}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <ZoomOut size={12} strokeWidth={1.75} className="text-muted-foreground" />
+      </button>
+      <div
+        ref={trackRef}
+        role="slider"
+        aria-label="Timeline zoom"
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={value}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowLeft" || e.key === "ArrowDown") nudge(-1)
+          if (e.key === "ArrowRight" || e.key === "ArrowUp") nudge(1)
+        }}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return
+          dragging.current = true
+          setFromClientX(e.clientX)
+          e.preventDefault()
+        }}
+        style={{
+          width: 56,
+          height: 16,
+          position: "relative",
+          flexShrink: 0,
+          cursor: "grab",
+          touchAction: "none",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: "50%",
+            transform: "translateY(-50%)",
+            height: 2,
+            borderRadius: 1,
+            background: ZOOM_TRACK,
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            left: `${pct}%`,
+            top: "50%",
+            transform: "translate(-50%, -50%)",
+            width: 9,
+            height: 9,
+            borderRadius: "50%",
+            border: `1.5px solid ${ZOOM_RING}`,
+            background: "transparent",
+            boxSizing: "border-box",
+            pointerEvents: "none",
+          }}
+        />
+      </div>
+      <button
+        type="button"
+        aria-label="Zoom in"
+        className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded border-0 bg-transparent p-0"
+        onClick={() => nudge(1)}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <ZoomIn size={12} strokeWidth={1.75} className="text-muted-foreground" />
+      </button>
+    </div>
+  )
 }
 
 // ─── Canvas ──────────────────────────────────────────────────────────────
@@ -137,31 +282,34 @@ function TimelineCanvas({
 
     const fStep = pxPerFrame >= 12 ? 1 : pxPerFrame >= 6 ? 5 : 10
     const fMajor = fStep * 10
-    ctx.font = `9px ${FONT}`
+    const rulerFontPx = 9
+    ctx.font = `${rulerFontPx}px ${FONT}`
     ctx.textAlign = "center"
     ctx.textBaseline = "bottom"
+    const rulerTickTop = (maj: boolean) => (maj ? 2 : RULER_H - 4)
     for (let f = 0; f <= clip.frameCount; f += fStep) {
       const x = ox + f * pxPerFrame
       if (x < LABEL_W - 10 || x > w + 10) continue
       const isM = f % fMajor === 0
       ctx.strokeStyle = isM ? C.rulerMajor : C.rulerTick
       ctx.beginPath()
-      ctx.moveTo(Math.round(x) + 0.5, isM ? 3 : RULER_H - 5)
+      ctx.moveTo(Math.round(x) + 0.5, rulerTickTop(isM))
       ctx.lineTo(Math.round(x) + 0.5, RULER_H)
       ctx.stroke()
       if (isM) {
         ctx.fillStyle = C.rulerText
-        ctx.fillText(String(f), x, RULER_H - 6)
+        ctx.fillText(String(f), x, RULER_H - 2)
       }
     }
 
-    // ── Value grid ──
-    ctx.font = `8px ${FONT}`
-    const isRight = ax.side === "right"
-
-    for (let v = ax.min; v <= ax.max; v += ax.subStep) {
-      const y = toY(v)
-      if (y < curveTop || y > curveBot) continue
+    // ── Value grid (clamp Y so min/max lines aren’t dropped to float noise) ──
+    ctx.font = `9px ${FONT}`
+    const isRight = false
+    const vSteps = Math.max(0, Math.ceil((ax.max - ax.min) / ax.subStep))
+    for (let i = 0; i <= vSteps; i++) {
+      const v = Math.min(ax.max, ax.min + i * ax.subStep)
+      let y = toY(v)
+      y = Math.max(curveTop, Math.min(curveBot, y))
       const isZero = Math.abs(v) < 0.001
       const isMajor = Math.abs(v % ax.step) < 0.001
       ctx.strokeStyle = isZero ? C.axisZero : isMajor ? C.axis : C.grid
@@ -173,23 +321,42 @@ function TimelineCanvas({
 
       if (isMajor) {
         ctx.fillStyle = C.label
+        let ly = y
+        if (ly <= curveTop + rulerFontPx * 0.6) {
+          ctx.textBaseline = "top"
+          ly = curveTop + 1
+        } else if (ly >= curveBot - rulerFontPx * 0.6) {
+          ctx.textBaseline = "bottom"
+          ly = curveBot - 1
+        } else {
+          ctx.textBaseline = "middle"
+        }
         if (isRight) {
           ctx.textAlign = "left"
-          ctx.textBaseline = "middle"
-          ctx.fillText(v.toFixed(v === Math.round(v) ? 0 : 1) + ax.unit, w - LABEL_W + 5, y)
+          ctx.fillText(v.toFixed(v === Math.round(v) ? 0 : 1) + ax.unit, w - LABEL_W + 4, ly)
         } else {
           ctx.textAlign = "right"
-          ctx.textBaseline = "middle"
-          ctx.fillText(v.toFixed(v === Math.round(v) ? 0 : 1) + ax.unit, LABEL_W - 5, y)
+          ctx.fillText(v.toFixed(v === Math.round(v) ? 0 : 1) + ax.unit, LABEL_W - 4, ly)
         }
       }
     }
 
-    // Vertical frame grid
+    // Full-height Y-axis at plot left (grid lines already span curveTop..curveBot after clamp)
+    ctx.strokeStyle = C.axis
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(LABEL_W + 0.5, curveTop)
+    ctx.lineTo(LABEL_W + 0.5, curveBot)
+    ctx.stroke()
+
+    ctx.textAlign = "left"
+    ctx.textBaseline = "alphabetic"
+
+    // Vertical frame grid (skip x = LABEL_W — Y-axis above)
     ctx.lineWidth = 0.5
     for (let f = 0; f <= clip.frameCount; f += fStep) {
       const x = toX(f)
-      if (x < LABEL_W || x > w) continue
+      if (x <= LABEL_W || x > w) continue
       ctx.strokeStyle = f % fMajor === 0 ? C.axis : C.grid
       ctx.beginPath()
       ctx.moveTo(x, curveTop)
@@ -250,7 +417,7 @@ function TimelineCanvas({
             )
             ctx.beginPath()
             ctx.arc(x, toY(val), isSel ? DOT_R + 1.5 : DOT_R, 0, Math.PI * 2)
-            ctx.fillStyle = isSel ? "#ffffff" : ch.color
+            ctx.fillStyle = isSel ? C.keyDotSel : ch.color
             ctx.fill()
             if (isSel) {
               ctx.strokeStyle = ch.color
@@ -272,18 +439,18 @@ function TimelineCanvas({
           }
           ctx.fillStyle = ch.color
           const display = ch.group === "rot" ? `${val.toFixed(1)}°` : val.toFixed(2)
-          ctx.fillText(`${ch.label}: ${display}`, readoutX, curveTop + 6 + i * 14)
+          ctx.fillText(`${ch.label}: ${display}`, readoutX, curveTop + 5 + i * 13)
         })
       } else {
         ctx.fillStyle = C.label
-        ctx.font = `11px ${FONT}`
+        ctx.font = `13px ${FONT}`
         ctx.textAlign = "center"
         ctx.textBaseline = "middle"
-        ctx.fillText("No keyframes — " + activeBone, (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
+        ctx.fillText("No keyframes — " + boneDisplayLabel(activeBone), (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
       }
     } else {
       ctx.fillStyle = C.label
-      ctx.font = `11px ${FONT}`
+      ctx.font = `13px ${FONT}`
       ctx.textAlign = "center"
       ctx.textBaseline = "middle"
       ctx.fillText("Select a bone to view curves", (w + LABEL_W) / 2, (curveTop + curveBot) / 2)
@@ -306,9 +473,12 @@ function TimelineCanvas({
       ctx.stroke()
     }
 
-    ctx.font = `7px ${FONT}`
+    ctx.font = `10px ${FONT}`
     ctx.textAlign = "center"
-    for (const [frame, count] of frames) {
+    const minDopeLabelGapPx = 22
+    let lastDopeLabelX = -1e9
+    const sortedDope = Array.from(frames.entries()).sort((a, b) => a[0] - b[0])
+    for (const [frame, count] of sortedDope) {
       const x = toX(frame)
       if (x < LABEL_W - DIAMOND || x > w + DIAMOND) continue
       const isSel = selectedKeyframes.some((s) => s.frame === frame && s.type === "dope")
@@ -321,16 +491,17 @@ function TimelineCanvas({
       ctx.fillStyle = isSel ? C.diamondSel : `rgba(170,170,195,${intensity})`
       ctx.fillRect(-sz / 2, -sz / 2, sz, sz)
       if (isSel) {
-        ctx.strokeStyle = "rgba(255,255,255,0.3)"
+        ctx.strokeStyle = "rgba(156,163,175,0.35)"
         ctx.lineWidth = 1
         ctx.strokeRect(-sz / 2 - 1, -sz / 2 - 1, sz + 2, sz + 2)
       }
       ctx.restore()
 
-      if (pxPerFrame >= 6 || frame % 5 === 0) {
+      if (x - lastDopeLabelX >= minDopeLabelGapPx) {
         ctx.fillStyle = isSel ? C.diamondSel : C.dopeLabelNum
         ctx.textBaseline = "top"
         ctx.fillText(String(frame), x, dopeMid + DIAMOND + 3)
+        lastDopeLabelX = x
       }
     }
 
@@ -343,10 +514,10 @@ function TimelineCanvas({
     ctx.lineTo(LABEL_W - 0.5, h)
     ctx.stroke()
     ctx.fillStyle = C.dopeLabel
-    ctx.font = `8px ${FONT}`
+    ctx.font = `10px ${FONT}`
     ctx.textAlign = "right"
     ctx.textBaseline = "middle"
-    ctx.fillText(activeBone || "Keys", LABEL_W - 6, dopeMid + 2)
+    ctx.fillText(activeBone ? boneDisplayLabel(activeBone) : "Keys", LABEL_W - 6, dopeMid + 2)
 
     // ── Playhead ──
     const px = toX(currentFrame)
@@ -380,12 +551,12 @@ function TimelineCanvas({
     ctx.textAlign = "center"
     ctx.textBaseline = "middle"
     ctx.fillStyle = C.frameBadge
-    const bw = ctx.measureText(badge).width + 8
+    const bw = ctx.measureText(badge).width + 6
     ctx.beginPath()
-    ctx.roundRect(LABEL_W / 2 - bw / 2, 4, bw, 14, 3)
+    ctx.roundRect(LABEL_W / 2 - bw / 2, 2, bw, 12, 2)
     ctx.fill()
     ctx.fillStyle = C.frameBadgeText
-    ctx.fillText(badge, LABEL_W / 2, 11)
+    ctx.fillText(badge, LABEL_W / 2, RULER_H / 2)
   }, [clip, pxPerFrame, scrollX, currentFrame, activeBone, visibleBones, selectedKeyframes, tab, getDopeFrames])
 
   useEffect(() => {
@@ -568,7 +739,7 @@ function TimelineCanvas({
 
 // ─── Timeline (public component) ─────────────────────────────────────────
 interface TimelineProps {
-  clip: AnimationClip
+  clip: AnimationClip | null
   currentFrame: number
   setCurrentFrame: (f: number | ((p: number) => number)) => void
   playing: boolean
@@ -590,16 +761,44 @@ export function Timeline({
   selectedKeyframes,
   setSelectedKeyframes,
 }: TimelineProps) {
+  const fc = clip?.frameCount ?? 0
   const [pxPerFrame, setPxPerFrame] = useState(8)
   const [scrollX, setScrollX] = useState(0)
   const [tab, setTab] = useState("allRot")
   const [, forceRedraw] = useState(0)
+  const timelineAreaRef = useRef<HTMLDivElement>(null)
+  const [trackWidth, setTrackWidth] = useState(0)
 
-  const onWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault()
-    if (e.ctrlKey || e.metaKey) setPxPerFrame((p) => Math.max(MIN_PX, Math.min(MAX_PX, p - e.deltaY * 0.02)))
-    else setScrollX((p) => Math.max(0, p + e.deltaX + e.deltaY))
+  const minPxPerFrame = useMemo(() => minPxPerFrameForViewport(trackWidth, fc), [trackWidth, fc])
+
+  useEffect(() => {
+    const el = timelineAreaRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setTrackWidth(el.clientWidth))
+    ro.observe(el)
+    setTrackWidth(el.clientWidth)
+    return () => ro.disconnect()
   }, [])
+
+  useEffect(() => {
+    setPxPerFrame((p) => Math.min(MAX_PX, Math.max(minPxPerFrame, p)))
+  }, [minPxPerFrame])
+
+  useEffect(() => {
+    if (trackWidth <= 0) return
+    const maxScroll = Math.max(0, LABEL_W + fc * pxPerFrame - trackWidth)
+    setScrollX((s) => Math.min(maxScroll, Math.max(0, s)))
+  }, [trackWidth, fc, pxPerFrame])
+
+  const onWheel = useCallback(
+    (e: React.WheelEvent) => {
+      e.preventDefault()
+      if (e.ctrlKey || e.metaKey)
+        setPxPerFrame((p) => Math.max(minPxPerFrame, Math.min(MAX_PX, p - e.deltaY * 0.02)))
+      else setScrollX((p) => Math.max(0, p + e.deltaX + e.deltaY))
+    },
+    [minPxPerFrame],
+  )
 
   const onSelectKeyframe = useCallback(
     (kf: SelectedKeyframe, multi: boolean) => {
@@ -618,6 +817,7 @@ export function Timeline({
 
   const onMoveDopeKeyframe = useCallback(
     (from: number, to: number) => {
+      if (!clip) return
       const clamped = Math.max(0, Math.min(clip.frameCount, to))
       if (clamped === from) return
       const bones = activeBone ? [activeBone] : visibleBones
@@ -638,6 +838,7 @@ export function Timeline({
 
   const onMoveCurveKeyframe = useCallback(
     (bone: string, from: number, chKey: string, toFrame: number, dv: number) => {
+      if (!clip) return
       const track = clip.boneTracks.get(bone)
       if (!track) return
       const clamped = Math.max(0, Math.min(clip.frameCount, toFrame))
@@ -663,14 +864,15 @@ export function Timeline({
   )
 
   const btnStyle: React.CSSProperties = {
-    width: 20,
-    height: 18,
+    width: 26,
+    height: 22,
     border: "none",
     borderRadius: 2,
     cursor: "pointer",
     background: "transparent",
     color: C.tabText,
-    fontSize: 9,
+    fontSize: 11,
+    lineHeight: 1,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -680,70 +882,89 @@ export function Timeline({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%", fontFamily: FONT, userSelect: "none" }}>
-      {/* Toolbar */}
+      {/* Toolbar — type sizes stay ≤ sidebar brand (text-sm / 14px) */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
-          height: 28,
+          height: 30,
           padding: "0 6px",
-          gap: 3,
+          gap: 4,
           background: C.tabBg,
           borderBottom: `1px solid ${C.border}`,
           flexShrink: 0,
           flexWrap: "nowrap",
         }}
       >
-        <button onClick={() => setCurrentFrame(0)} style={btnStyle}>⏮</button>
-        <button onClick={() => setCurrentFrame((p) => Math.max(0, Math.round(typeof p === "number" ? p : 0) - 1))} style={btnStyle}>◀</button>
+        <button type="button" onClick={() => setCurrentFrame(0)} style={btnStyle}>
+          ⏮
+        </button>
         <button
+          type="button"
+          onClick={() => setCurrentFrame((p) => Math.max(0, Math.round(typeof p === "number" ? p : 0) - 1))}
+          style={btnStyle}
+        >
+          ◀
+        </button>
+        <button
+          type="button"
           onClick={() => setPlaying((p) => !p)}
           style={{
             ...btnStyle,
-            width: 26,
+            width: 30,
+            height: 24,
             background: playing ? C.playhead : C.tabActive,
-            color: playing ? "#fff" : C.tabTextActive,
+            color: playing ? C.toolbarOnAccent : C.tabText,
             borderRadius: 3,
           }}
         >
           {playing ? "⏸" : "▶"}
         </button>
-        <button onClick={() => setCurrentFrame((p) => Math.min(clip.frameCount, Math.round(typeof p === "number" ? p : 0) + 1))} style={btnStyle}>▶</button>
-        <button onClick={() => setCurrentFrame(clip.frameCount)} style={btnStyle}>⏭</button>
+        <button
+          type="button"
+          onClick={() => setCurrentFrame((p) => Math.min(fc, Math.round(typeof p === "number" ? p : 0) + 1))}
+          style={btnStyle}
+        >
+          ▶
+        </button>
+        <button type="button" onClick={() => setCurrentFrame(fc)} style={btnStyle}>
+          ⏭
+        </button>
         <div
           style={{
-            padding: "1px 6px",
+            padding: "2px 6px",
             borderRadius: 3,
             background: C.frameBadge,
-            fontSize: 9,
+            fontSize: 10,
             color: C.frameBadgeText,
             margin: "0 2px",
             whiteSpace: "nowrap",
           }}
         >
-          F{String(Math.round(currentFrame)).padStart(3, "0")} / {clip.frameCount}
+          F{String(Math.round(currentFrame)).padStart(3, "0")} / {fc}
         </div>
-        <div style={{ width: 1, height: 14, background: C.border, margin: "0 2px" }} />
+        <div style={{ width: 1, height: 16, background: C.border, margin: "0 2px" }} />
         {/* Channel tabs */}
         {TABS.map((t) => {
           if (t.sep)
-            return <div key={t.key} style={{ width: 1, height: 14, background: C.border, margin: "0 1px" }} />
+            return <div key={t.key} style={{ width: 1, height: 16, background: C.border, margin: "0 1px" }} />
           const active = tab === t.key
           return (
             <button
+              type="button"
               key={t.key}
               onClick={() => setTab(t.key)}
               style={{
-                height: 18,
+                height: 22,
                 padding: "0 6px",
                 border: "none",
                 borderRadius: 3,
                 cursor: "pointer",
-                fontSize: 9,
+                fontSize: 10,
                 fontFamily: FONT,
                 whiteSpace: "nowrap",
                 background: active ? (t.color || C.tabActive) : "transparent",
-                color: active ? "#fff" : (t.color || C.tabText),
+                color: active ? (t.color ? C.toolbarOnAccent : C.tabText) : t.color || C.tabText,
                 opacity: active ? 1 : 0.65,
               }}
             >
@@ -752,38 +973,43 @@ export function Timeline({
           )
         })}
         <div style={{ flex: 1 }} />
-        <input
-          type="range"
-          min={MIN_PX}
-          max={MAX_PX}
-          step={0.5}
-          value={pxPerFrame}
-          onChange={(e) => setPxPerFrame(Number(e.target.value))}
-          style={{ width: 50, height: 10, accentColor: C.playhead }}
-        />
-        {activeBone && (
-          <span style={{ fontSize: 9, color: C.sidebarActive, marginLeft: 4 }}>{activeBone}</span>
-        )}
+        <ZoomRuler min={minPxPerFrame} max={MAX_PX} value={pxPerFrame} onChange={setPxPerFrame} />
       </div>
       {/* Canvas */}
-      <div style={{ flex: 1, minHeight: 0 }} onWheel={onWheel}>
-        <TimelineCanvas
-          clip={clip}
-          pxPerFrame={pxPerFrame}
-          scrollX={scrollX}
-          currentFrame={currentFrame}
-          activeBone={activeBone}
-          visibleBones={visibleBones}
-          selectedKeyframes={selectedKeyframes}
-          tab={tab}
-          onSetCurrentFrame={(f) => {
-            setPlaying(false)
-            setCurrentFrame(f)
-          }}
-          onSelectKeyframe={onSelectKeyframe}
-          onMoveDopeKeyframe={onMoveDopeKeyframe}
-          onMoveCurveKeyframe={onMoveCurveKeyframe}
-        />
+      <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0 }} onWheel={onWheel}>
+        {clip ? (
+          <TimelineCanvas
+            clip={clip}
+            pxPerFrame={pxPerFrame}
+            scrollX={scrollX}
+            currentFrame={currentFrame}
+            activeBone={activeBone}
+            visibleBones={visibleBones}
+            selectedKeyframes={selectedKeyframes}
+            tab={tab}
+            onSetCurrentFrame={(f) => {
+              setPlaying(false)
+              setCurrentFrame(f)
+            }}
+            onSelectKeyframe={onSelectKeyframe}
+            onMoveDopeKeyframe={onMoveDopeKeyframe}
+            onMoveCurveKeyframe={onMoveCurveKeyframe}
+          />
+        ) : (
+          <div
+            style={{
+              height: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: C.label,
+              fontSize: 11,
+              background: C.curveBg,
+            }}
+          >
+            Load VMD for timeline…
+          </div>
+        )}
       </div>
     </div>
   )
