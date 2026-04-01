@@ -21,6 +21,7 @@ import {
 } from "@/lib/keyframe-insert"
 import { AxisSliderRow } from "@/components/axis-slider-row"
 import { InterpolationCurveEditor, PRESETS, type CurvePoint } from "@/components/interpolation-curve-editor"
+import { cn } from "@/lib/utils"
 
 /** Must match `loadAnimation` name in app/page (engine clip vs React state). */
 const STUDIO_ANIM_NAME = "studio"
@@ -92,7 +93,7 @@ function interpolationTemplateForChannel(tab: IpTab): [CurvePoint, CurvePoint] {
   return [{ x: ip.translationZ[0].x, y: ip.translationZ[0].y }, { x: ip.translationZ[1].x, y: ip.translationZ[1].y }]
 }
 
-interface SelectionInspectorProps {
+interface PropertiesInspectorProps {
   clip: AnimationClip | null
   currentFrame: number
   activeBone: string | null
@@ -109,7 +110,7 @@ interface SelectionInspectorProps {
   onDeleteSelectedKeyframes: () => void
 }
 
-export function SelectionInspector({
+export function PropertiesInspector({
   clip,
   currentFrame,
   activeBone,
@@ -121,7 +122,7 @@ export function SelectionInspector({
   livePose,
   onInsertKeyframeAtPlayhead,
   onDeleteSelectedKeyframes,
-}: SelectionInspectorProps) {
+}: PropertiesInspectorProps) {
   const fPlay = Math.round(currentFrame)
   const singleSel = selectedKeyframes.length === 1 ? selectedKeyframes[0] : null
   const multiSel = selectedKeyframes.length > 1
@@ -206,12 +207,7 @@ export function SelectionInspector({
   )
 
   return (
-    <div className="space-y-0 text-[11px] leading-relaxed text-foreground">
-      {multiSel ? (
-        <section className="mb-3 rounded-md border border-border/80 bg-muted/15 px-2 py-2 text-[11px] text-muted-foreground">
-          Multiple keyframes selected — delete or refine selection on the timeline.
-        </section>
-      ) : null}
+    <div className="space-y-0 text-[11px] leading-relaxed text-inherit">
 
       {/* ─── Bone: sliders always; clip write updates key at playhead or inserts one ─── */}
       {showBoneStats && activeBone ? (
@@ -222,7 +218,7 @@ export function SelectionInspector({
                 const { title, subtitle } = boneTitleSubtitle(activeBone)
                 return (
                   <>
-                    <div className="text-xs font-semibold text-foreground">{title}</div>
+                    <div className="text-xs font-semibold text-inherit">{title}</div>
                     {subtitle ? <div className="text-[10px] text-muted-foreground">{subtitle}</div> : null}
                   </>
                 )
@@ -286,16 +282,17 @@ export function SelectionInspector({
                 ["tz", "Tra Z"],
               ] as const
             ).map(([key, label]) => (
-              <button
+              <Button
                 key={key}
                 type="button"
+                variant={ipTab === key ? "secondary" : "ghost"}
+                size="xs"
                 disabled={!canEditIp}
                 onClick={() => setIpTab(key)}
-                className={`rounded px-2 py-0.5 text-[9px] font-medium transition-colors ${ipTab === key ? "bg-[#1a1a22] text-foreground" : "bg-transparent text-muted-foreground hover:text-foreground/90"
-                  }`}
+                className="h-6 px-2 text-[9px] font-medium"
               >
                 {label}
-              </button>
+              </Button>
             ))}
           </div>
           <div className="flex items-stretch gap-1.5" style={{ height: 164 }}>
@@ -313,18 +310,22 @@ export function SelectionInspector({
                   pr.p2.x === ipPair[1].x &&
                   pr.p2.y === ipPair[1].y
                 return (
-                  <button
+                  <Button
                     key={pr.label}
                     type="button"
+                    variant={active ? "secondary" : "outline"}
+                    size="xs"
                     disabled={!canEditIp}
                     onClick={() => applyInterpolation(pr.p1, pr.p2)}
-                    className={`flex-1  truncate rounded border-1  px-1 text-center text-[9.5px] font-medium transition-colors bg-[#1a1a22] ${active
-                      ? "text-cyan-400"
-                      : "text-muted-foreground hover:border-cyan-600 hover:text-foreground"
-                      }`}
+                    className={cn(
+                      "h-auto min-h-0 flex-1 truncate px-1 py-0.5 text-center text-[9.5px] font-medium leading-tight",
+                      active
+                        ? "border-primary/30 text-primary"
+                        : "text-muted-foreground hover:border-primary/25 hover:text-accent-foreground",
+                    )}
                   >
                     {pr.label}
-                  </button>
+                  </Button>
                 )
               })}
             </div>
@@ -335,8 +336,8 @@ export function SelectionInspector({
       {activeMorph && clip && !multiSel ? (
         <section className="space-y-2.5 border-b border-border pb-3">
           <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Playhead · morph</div>
-          <div className="font-mono text-[11px] text-blue-400/95">{activeMorph}</div>
-          <div className="font-mono tabular-nums text-[11px] text-foreground/90">
+          <div className="font-mono text-[11px] text-primary">{activeMorph}</div>
+          <div className="font-mono tabular-nums text-[11px] text-inherit">
             {morphWeight !== null ? morphWeight.toFixed(2) : "—"}
           </div>
         </section>

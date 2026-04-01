@@ -88,7 +88,7 @@ export function InterpolationCurveEditor({ p1, p2, disabled, onChange }: Interpo
     ctx.clearRect(0, 0, SIZE, SIZE)
 
     // Grid lines
-    ctx.strokeStyle = "rgba(255,255,255,0.08)"
+    ctx.strokeStyle = "rgba(255,255,255,0.15)"
     ctx.lineWidth = 0.5
     for (let i = 0; i <= 4; i++) {
       const x = GX + (i / 4) * GW
@@ -272,7 +272,10 @@ export function InterpolationCurveEditor({ p1, p2, disabled, onChange }: Interpo
 
   return (
     <div
-      className={cn("shrink-0 rounded border border-border bg-[#141418] p-0.5", disabled && "pointer-events-none opacity-50")}
+      className={cn(
+        "shrink-0 rounded border border-border bg-background p-0.5",
+        disabled && "pointer-events-none opacity-50",
+      )}
       style={{ width: SIZE + 4, height: SIZE + 4 }}
     >
       <canvas

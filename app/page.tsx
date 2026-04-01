@@ -17,7 +17,7 @@ import Link from "next/link"
 import Image from "next/image"
 import { BoneList } from "@/components/bone-list"
 import { MorphList } from "@/components/morph-list"
-import { SelectionInspector } from "@/components/selection-inspector"
+import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline, type SelectedKeyframe } from "@/components/timeline"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/keyframe-insert"
@@ -179,6 +179,9 @@ export default function Home() {
             if (c) {
               setClip(c)
               model.play(STUDIO_ANIM_NAME, { loop: false })
+              if (model.name === "reze") {
+                model.setMorphWeight("抗穿模", 0.5)
+              }
               model.pause()
               model.seek(0)
             }
@@ -234,7 +237,12 @@ export default function Home() {
   useEffect(() => {
     const model = modelRef.current
     if (!model || !clip) return
-    if (playing) model.play()
+    if (playing) {
+      model.play()
+      if (model.name === "reze") {
+        model.setMorphWeight("抗穿模", 0.5)
+      }
+    }
     else model.pause()
   }, [playing, clip])
 
@@ -316,7 +324,7 @@ export default function Home() {
     const boneTracks = new Map(clip.boneTracks)
     boneTracks.set(activeBone, nextTrack)
     setClip({ ...clip, boneTracks })
-    // Focus inspector edit tools (sliders + curves) like selecting a key on the graph
+    // Focus properties (sliders + curves) like selecting a key on the graph
     setSelectedKeyframes([{ type: "curve", bone: activeBone, frame, channel: "rx" }])
   }, [clip, activeBone, activeMorph, currentFrame])
 
@@ -449,16 +457,15 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Right sidebar */}
-        <aside className="flex w-[280px] shrink-0 flex-col border-l border-border">
-          <div className="flex min-h-9 shrink-0 items-center justify-between border-b border-border px-3 py-2">
-            <span className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">Selection</span>
-            <span className="rounded bg-muted/90 px-1.5 py-0.5 text-[9px] font-medium capitalize text-muted-foreground">
-              {activeBone ? "bone" : activeMorph ? "morph" : "—"}
+        {/* Right sidebar — properties for active bone / morph / keyframe context */}
+        <aside className="flex w-[280px] shrink-0 flex-col border-l border-sidebar-border text-sidebar-foreground">
+          <div className="flex min-h-9 shrink-0 items-center border-b border-sidebar-border px-3 py-2">
+            <span className="text-[11px] font-medium uppercase tracking-widest text-sidebar-foreground/70">
+              Properties
             </span>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 text-[11px] [scrollbar-width:thin]">
-            <SelectionInspector
+            <PropertiesInspector
               clip={clip}
               currentFrame={currentFrame}
               activeBone={activeBone}

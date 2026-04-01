@@ -2,6 +2,8 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { ZoomIn, ZoomOut } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 import {
   type AnimationClip,
   type BoneKeyframe,
@@ -22,6 +24,90 @@ import {
   ALL_CHANNELS,
 } from "@/lib/animation"
 
+/** Scrub playhead 0…frameCount — track/thumb aligned with toolbar (Tailwind tokens). */
+function TransportFrameSlider({
+  frameCount,
+  value,
+  onChange,
+}: {
+  frameCount: number
+  value: number
+  onChange: (f: number) => void
+}) {
+  const trackRef = useRef<HTMLDivElement>(null)
+  const dragging = useRef(false)
+
+  const setFromClientX = useCallback(
+    (clientX: number) => {
+      const el = trackRef.current
+      if (!el || frameCount <= 0) return
+      const rect = el.getBoundingClientRect()
+      const t = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(rect.width, 1)))
+      onChange(Math.round(t * frameCount))
+    },
+    [frameCount, onChange],
+  )
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!dragging.current) return
+      setFromClientX(e.clientX)
+    }
+    const onUp = () => {
+      dragging.current = false
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+    window.addEventListener("pointercancel", onUp)
+    return () => {
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      window.removeEventListener("pointercancel", onUp)
+    }
+  }, [setFromClientX])
+
+  const disabled = frameCount <= 0
+  const pct = !disabled && frameCount > 0 ? (value / frameCount) * 100 : 0
+
+  return (
+    <div className="mx-1 ml-0.5 flex shrink-0 select-none items-center">
+      <div
+        ref={trackRef}
+        role="slider"
+        aria-label="Scrub playhead"
+        aria-valuemin={0}
+        aria-valuemax={frameCount}
+        aria-valuenow={Math.round(value)}
+        aria-disabled={disabled}
+        tabIndex={disabled ? -1 : 0}
+        onKeyDown={(e) => {
+          if (disabled) return
+          if (e.key === "ArrowLeft" || e.key === "ArrowDown")
+            onChange(Math.max(0, Math.round(value) - 1))
+          if (e.key === "ArrowRight" || e.key === "ArrowUp")
+            onChange(Math.min(frameCount, Math.round(value) + 1))
+        }}
+        onPointerDown={(e) => {
+          if (disabled || e.button !== 0) return
+          dragging.current = true
+          setFromClientX(e.clientX)
+          e.preventDefault()
+        }}
+        className={cn(
+          "relative h-5 w-[88px] shrink-0 touch-none",
+          disabled ? "pointer-events-none opacity-15" : "cursor-grab",
+        )}
+      >
+        <div className="absolute left-0 right-0 top-1/2 h-0.5 -translate-y-1/2 rounded-[1px] bg-border" />
+        <div
+          className="pointer-events-none absolute top-1/2 size-[9px] -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-muted-foreground bg-secondary box-border"
+          style={{ left: `${pct}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
 // ─── Selection type ──────────────────────────────────────────────────────
 export interface SelectedKeyframe {
   bone?: string
@@ -29,10 +115,6 @@ export interface SelectedKeyframe {
   channel?: string
   type: "dope" | "curve"
 }
-
-// Zoom: muted track/ring (shadcn muted-foreground family, not white).
-const ZOOM_TRACK = "rgba(156,163,175,0.2)"
-const ZOOM_RING = "rgba(156,163,175,0.5)"
 
 function ZoomRuler({
   min,
@@ -92,19 +174,18 @@ function ZoomRuler({
     onChange(Math.max(min, Math.min(max, snapVal(value + dir * nudgeDelta))))
 
   return (
-    <div
-      className="flex shrink-0 items-center gap-1 select-none text-muted-foreground"
-      style={{ userSelect: "none" }}
-    >
-      <button
+    <div className="flex shrink-0 select-none items-center gap-1 text-muted-foreground">
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-xs"
         aria-label="Zoom out"
-        className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded border-0 bg-transparent p-0"
+        className="size-5 shrink-0 p-0 text-muted-foreground"
         onClick={() => nudge(-1)}
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <ZoomOut size={12} strokeWidth={1.75} className="text-muted-foreground" />
-      </button>
+        <ZoomOut size={12} strokeWidth={1.75} />
+      </Button>
       <div
         ref={trackRef}
         role="slider"
@@ -123,52 +204,25 @@ function ZoomRuler({
           setFromClientX(e.clientX)
           e.preventDefault()
         }}
-        style={{
-          width: 56,
-          height: 16,
-          position: "relative",
-          flexShrink: 0,
-          cursor: "grab",
-          touchAction: "none",
-        }}
+        className="relative h-4 w-14 shrink-0 cursor-grab touch-none"
       >
+        <div className="absolute left-0 right-0 top-1/2 h-0.5 -translate-y-1/2 rounded-[1px] bg-border" />
         <div
-          style={{
-            position: "absolute",
-            left: 0,
-            right: 0,
-            top: "50%",
-            transform: "translateY(-50%)",
-            height: 2,
-            borderRadius: 1,
-            background: ZOOM_TRACK,
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            left: `${pct}%`,
-            top: "50%",
-            transform: "translate(-50%, -50%)",
-            width: 9,
-            height: 9,
-            borderRadius: "50%",
-            border: `1.5px solid ${ZOOM_RING}`,
-            background: "transparent",
-            boxSizing: "border-box",
-            pointerEvents: "none",
-          }}
+          className="pointer-events-none absolute top-1/2 size-[9px] -translate-x-1/2 -translate-y-1/2 rounded-full border-[1.5px] border-muted-foreground bg-transparent box-border"
+          style={{ left: `${pct}%` }}
         />
       </div>
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-xs"
         aria-label="Zoom in"
-        className="flex size-5 shrink-0 cursor-pointer items-center justify-center rounded border-0 bg-transparent p-0"
+        className="size-5 shrink-0 p-0 text-muted-foreground"
         onClick={() => nudge(1)}
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <ZoomIn size={12} strokeWidth={1.75} className="text-muted-foreground" />
-      </button>
+        <ZoomIn size={12} strokeWidth={1.75} />
+      </Button>
     </div>
   )
 }
@@ -260,7 +314,7 @@ function TimelineCanvas({
     const toX = (f: number) => ox + f * pxPerFrame
 
     // ── Backgrounds ──
-    ctx.fillStyle = C.curveBg
+    ctx.fillStyle = "rgba(0,0,0,0)"
     ctx.fillRect(0, 0, w, dopeY)
     ctx.fillStyle = C.dopeBg
     ctx.fillRect(0, dopeY, w, DOPE_H)
@@ -501,7 +555,7 @@ function TimelineCanvas({
     ctx.font = `10px ${FONT}`
     ctx.textAlign = "right"
     ctx.textBaseline = "middle"
-    ctx.fillText(activeBone ? boneDisplayLabel(activeBone) : "Keys", LABEL_W - 6, dopeMid + 2)
+    ctx.fillText("Keys", LABEL_W - 6, dopeMid + 2)
 
     // ── Playhead ──
     const px = toX(currentFrame)
@@ -847,116 +901,104 @@ export function Timeline({
     [clip, setSelectedKeyframes],
   )
 
-  const btnStyle: React.CSSProperties = {
-    width: 26,
-    height: 20,
-    border: "none",
-    borderRadius: 2,
-    cursor: "pointer",
-    background: "transparent",
-    color: C.tabText,
-    fontSize: 11,
-    lineHeight: 1,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontFamily: FONT,
-    padding: 0,
-  }
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%", fontFamily: FONT, userSelect: "none" }}>
-      {/* Toolbar — type sizes stay ≤ sidebar brand (text-sm / 14px) */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          height: 26,
-          padding: "0 6px",
-          gap: 4,
-          background: C.tabBg,
-          borderBottom: `1px solid ${C.border}`,
-          flexShrink: 0,
-          flexWrap: "nowrap",
-        }}
-      >
-        <button type="button" onClick={() => setCurrentFrame(0)} style={btnStyle}>
-          ⏮
-        </button>
-        <button
+    <div className="flex h-full w-full select-none flex-col" style={{ fontFamily: FONT }}>
+      {/* Toolbar — compact controls + channel tabs; axis hues stay exact via inline `t.color` when set */}
+      <div className="flex h-[26px] shrink-0 flex-nowrap items-center gap-1 border-b border-border bg-background px-1.5">
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
+          className="h-5 min-w-[26px] shrink-0 px-0 font-mono text-[11px] text-muted-foreground"
+          onClick={() => setCurrentFrame(0)}
+        >
+          ⏮
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-5 min-w-[26px] shrink-0 px-0 font-mono text-[11px] text-muted-foreground"
           onClick={() => setCurrentFrame((p) => Math.max(0, Math.round(typeof p === "number" ? p : 0) - 1))}
-          style={btnStyle}
         >
           ◀
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="secondary"
+          size="sm"
+          className={cn(
+            "h-[22px] min-w-[30px] shrink-0 rounded-md px-1.5 font-mono text-[11px]",
+            playing && "bg-[#d83838] text-[#0f0f12] hover:bg-[#d83838]/90",
+          )}
           onClick={() => setPlaying((p) => !p)}
-          style={{
-            ...btnStyle,
-            width: 30,
-            height: 22,
-            background: playing ? C.playhead : C.tabActive,
-            color: playing ? C.toolbarOnAccent : C.tabText,
-            borderRadius: 3,
-          }}
         >
           {playing ? "⏸" : "▶"}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
+          className="h-5 min-w-[26px] shrink-0 px-0 font-mono text-[11px] text-muted-foreground"
           onClick={() => setCurrentFrame((p) => Math.min(fc, Math.round(typeof p === "number" ? p : 0) + 1))}
-          style={btnStyle}
         >
           ▶
-        </button>
-        <button type="button" onClick={() => setCurrentFrame(fc)} style={btnStyle}>
-          ⏭
-        </button>
-        <div
-          style={{
-            padding: "1px 6px",
-            borderRadius: 3,
-            background: C.frameBadge,
-            fontSize: 9,
-            color: C.frameBadgeText,
-            margin: "0 2px",
-            whiteSpace: "nowrap",
-          }}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-5 min-w-[26px] shrink-0 px-0 font-mono text-[11px] text-muted-foreground"
+          onClick={() => setCurrentFrame(fc)}
         >
-          F{String(Math.round(currentFrame)).padStart(3, "0")} / {fc}
+          ⏭
+        </Button>
+        <TransportFrameSlider
+          frameCount={fc}
+          value={currentFrame}
+          onChange={(f) => {
+            setPlaying(false)
+            setCurrentFrame(f)
+          }}
+        />
+        <div className="mx-0.5 whitespace-nowrap rounded-md border border-border/50 bg-card px-1.5 py-px font-mono text-[9px] tabular-nums text-muted-foreground">
+          F{String(Math.round(currentFrame)).padStart(4, "0")} / {fc}
         </div>
-        <div style={{ width: 1, height: 14, background: C.border, margin: "0 2px" }} />
+        <div className="mx-0.5 h-3.5 w-px shrink-0 bg-border" />
         {/* Channel tabs */}
         {TABS.map((t) => {
           if (t.sep)
-            return <div key={t.key} style={{ width: 1, height: 14, background: C.border, margin: "0 1px" }} />
+            return <div key={t.key} className="mx-px h-3.5 w-px shrink-0 bg-border" />
           const active = tab === t.key
           return (
-            <button
+            <Button
               type="button"
               key={t.key}
+              variant="ghost"
+              size="sm"
               onClick={() => setTab(t.key)}
-              style={{
-                height: 20,
-                padding: "0 6px",
-                border: "none",
-                borderRadius: 3,
-                cursor: "pointer",
-                fontSize: 10,
-                fontFamily: FONT,
-                whiteSpace: "nowrap",
-                background: active ? (t.color || C.tabActive) : "transparent",
-                color: active ? (t.color ? C.toolbarOnAccent : C.tabText) : t.color || C.tabText,
-                opacity: active ? 1 : 0.65,
-              }}
+              className={cn(
+                "h-5 min-h-5 shrink-0 rounded-md px-1.5 font-mono text-[10px]",
+                active
+                  ? t.color
+                    ? "text-[#0f0f12] hover:opacity-90"
+                    : "bg-secondary text-foreground hover:bg-secondary/80"
+                  : "opacity-65 hover:opacity-100",
+                !active && !t.color && "text-muted-foreground",
+              )}
+              style={
+                active && t.color
+                  ? { backgroundColor: t.color }
+                  : !active && t.color
+                    ? { color: t.color }
+                    : undefined
+              }
             >
               {t.label}
-            </button>
+            </Button>
           )
         })}
-        <div style={{ flex: 1 }} />
+        <div className="min-w-0 flex-1" />
         <ZoomRuler min={minPxPerFrame} max={MAX_PX} value={pxPerFrame} onChange={setPxPerFrame} />
       </div>
       {/* Canvas */}
