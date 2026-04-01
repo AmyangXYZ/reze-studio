@@ -3,7 +3,7 @@
 import type { Dispatch, RefObject, SetStateAction } from "react"
 import { useCallback, useMemo, useState } from "react"
 import type { AnimationClip, BoneInterpolation, BoneKeyframe, Model } from "reze-engine"
-import { Vec3 } from "reze-engine"
+import { Quat, Vec3 } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import type { SelectedKeyframe } from "@/components/timeline"
 import {
@@ -166,18 +166,23 @@ export function PropertiesInspector({
     (axisIdx: 0 | 1 | 2, v: number) => {
       const model = modelRef.current
       if (!activeBone || !clip || !model) return
-      model.loadAnimation(STUDIO_ANIM_NAME, clip)
-      model.seek(Math.max(0, currentFrame) / 30)
-      const pose = readLocalPoseAfterSeek(model, activeBone)
-      if (!pose) return
-      const e = quatToEuler(pose.rotation)
-      const next = axisIdx === 0 ? { ...e, x: v } : axisIdx === 1 ? { ...e, y: v } : { ...e, z: v }
-      const q = eulerToQuat(next.x, next.y, next.z)
       const frame = Math.round(Math.max(0, Math.min(clip.frameCount, currentFrame)))
       const atKey = findKeyframeAt(clip, activeBone, frame)
+      model.loadAnimation(STUDIO_ANIM_NAME, clip)
+      model.seek(Math.max(0, currentFrame) / 30)
+      let q: Quat
       if (atKey) {
+        // Other euler components from stored key, not blended pose (avoids sibling axes drifting)
+        const e = quatToEuler(atKey.rotation)
+        const next = axisIdx === 0 ? { ...e, x: v } : axisIdx === 1 ? { ...e, y: v } : { ...e, z: v }
+        q = eulerToQuat(next.x, next.y, next.z)
         setClip(patchKeyframeAt(clip, activeBone, frame, (kf) => { kf.rotation = q }))
       } else {
+        const pose = readLocalPoseAfterSeek(model, activeBone)
+        if (!pose) return
+        const e = quatToEuler(pose.rotation)
+        const next = axisIdx === 0 ? { ...e, x: v } : axisIdx === 1 ? { ...e, y: v } : { ...e, z: v }
+        q = eulerToQuat(next.x, next.y, next.z)
         setClip(upsertBoneKeyframeAtFrame(clip, activeBone, frame, q, pose.translation))
       }
     },
@@ -188,18 +193,21 @@ export function PropertiesInspector({
     (axisIdx: 0 | 1 | 2, v: number) => {
       const model = modelRef.current
       if (!activeBone || !clip || !model) return
-      model.loadAnimation(STUDIO_ANIM_NAME, clip)
-      model.seek(Math.max(0, currentFrame) / 30)
-      const pose = readLocalPoseAfterSeek(model, activeBone)
-      if (!pose) return
-      const t = pose.translation
-      const next =
-        axisIdx === 0 ? new Vec3(v, t.y, t.z) : axisIdx === 1 ? new Vec3(t.x, v, t.z) : new Vec3(t.x, t.y, v)
       const frame = Math.round(Math.max(0, Math.min(clip.frameCount, currentFrame)))
       const atKey = findKeyframeAt(clip, activeBone, frame)
+      model.loadAnimation(STUDIO_ANIM_NAME, clip)
+      model.seek(Math.max(0, currentFrame) / 30)
       if (atKey) {
+        const t = atKey.translation
+        const next =
+          axisIdx === 0 ? new Vec3(v, t.y, t.z) : axisIdx === 1 ? new Vec3(t.x, v, t.z) : new Vec3(t.x, t.y, v)
         setClip(patchKeyframeAt(clip, activeBone, frame, (kf) => { kf.translation = next }))
       } else {
+        const pose = readLocalPoseAfterSeek(model, activeBone)
+        if (!pose) return
+        const t = pose.translation
+        const next =
+          axisIdx === 0 ? new Vec3(v, t.y, t.z) : axisIdx === 1 ? new Vec3(t.x, v, t.z) : new Vec3(t.x, t.y, v)
         setClip(upsertBoneKeyframeAtFrame(clip, activeBone, frame, pose.rotation, next))
       }
     },

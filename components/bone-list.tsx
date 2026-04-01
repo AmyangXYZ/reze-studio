@@ -72,7 +72,7 @@ export function BoneList({
                       onSelectBone(b)
                     }}
                     className={cn(
-                      "flex h-auto min-h-0 w-full shrink justify-start gap-1 rounded-none py-1 pl-6 pr-3 text-left text-[11px] font-mono font-normal leading-none text-muted-foreground [&_svg]:size-3",
+                      "flex h-auto min-h-0 w-full shrink justify-start gap-1.5 rounded-none py-1 pl-6 pr-3 text-left text-[11px] font-mono font-normal leading-none text-muted-foreground [&_svg]:size-3",
                       activeBone === b
                         ? "bg-blue-400/[0.08] text-blue-400 hover:bg-blue-400/12 hover:text-blue-400"
                         : "hover:bg-white/[0.03] hover:text-muted-foreground",

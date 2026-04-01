@@ -1,7 +1,16 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react"
-import { ZoomIn, ZoomOut } from "lucide-react"
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Pause,
+  Play,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import {
@@ -180,7 +189,11 @@ function ZoomRuler({
         variant="ghost"
         size="icon-xs"
         aria-label="Zoom out"
-        className="size-5 shrink-0 p-0 text-muted-foreground"
+        className={cn(
+          "size-5 shrink-0 overflow-hidden p-0 text-muted-foreground",
+          "hover:bg-transparent dark:hover:bg-transparent active:bg-muted/50",
+          "focus-visible:outline-none focus-visible:ring-0",
+        )}
         onClick={() => nudge(-1)}
         onPointerDown={(e) => e.stopPropagation()}
       >
@@ -217,7 +230,11 @@ function ZoomRuler({
         variant="ghost"
         size="icon-xs"
         aria-label="Zoom in"
-        className="size-5 shrink-0 p-0 text-muted-foreground"
+        className={cn(
+          "size-5 shrink-0 overflow-hidden p-0 text-muted-foreground",
+          "hover:bg-transparent dark:hover:bg-transparent active:bg-muted/50",
+          "focus-visible:outline-none focus-visible:ring-0",
+        )}
         onClick={() => nudge(1)}
         onPointerDown={(e) => e.stopPropagation()}
       >
@@ -359,9 +376,13 @@ function TimelineCanvas({
       }
     }
 
-    // ── Value grid (clamp Y so min/max lines aren’t dropped to float noise) ──
+    // ── Value plot: fixed left strip (doesn’t scroll with ox) + Y ticks/labels ──
+    ctx.fillStyle = C.ruler
+    ctx.fillRect(0, curveTop, LABEL_W, curveBot - curveTop)
+
     ctx.font = `9px ${FONT}`
     const isRight = false
+    const isRotAxis = channels[0]?.group === "rot"
     const vSteps = Math.max(0, Math.ceil((ax.max - ax.min) / ax.subStep))
     for (let i = 0; i <= vSteps; i++) {
       const v = Math.min(ax.max, ax.min + i * ax.subStep)
@@ -369,17 +390,35 @@ function TimelineCanvas({
       y = Math.max(curveTop, Math.min(curveBot, y))
       const isZero = Math.abs(v) < 0.001
       const isMajor = Math.abs(v % ax.step) < 0.001
-      ctx.strokeStyle = isZero ? C.axisZero : isMajor ? C.axis : C.grid
+      const stroke = isZero ? C.axisZero : isMajor ? C.axis : C.grid
+      ctx.strokeStyle = stroke
       ctx.lineWidth = isZero ? 1 : 0.5
+      // Tick into the fixed left gutter (value axis) so scale stays visible when scrolled
+      ctx.beginPath()
+      ctx.moveTo(LABEL_W - (isMajor || isZero ? 5 : 3), y)
+      ctx.lineTo(LABEL_W, y)
+      ctx.stroke()
       ctx.beginPath()
       ctx.moveTo(LABEL_W, y)
       ctx.lineTo(w, y)
       ctx.stroke()
 
-      // Value labels on the left are intentionally omitted for a cleaner look.
+      if (isMajor || isZero) {
+        ctx.fillStyle = C.rulerText
+        ctx.textAlign = "right"
+        ctx.textBaseline = "middle"
+        const label = isRotAxis
+          ? `${Math.round(v)}°`
+          : Math.abs(v) < 0.001
+            ? "0"
+            : Math.abs(v - Math.round(v)) < 0.05
+              ? String(Math.round(v))
+              : v.toFixed(1)
+        ctx.fillText(label, LABEL_W - 6, y)
+      }
     }
 
-    // Full-height Y-axis at plot left (grid lines already span curveTop..curveBot after clamp)
+    // Full-height Y-axis at plot left (screen-fixed at LABEL_W when scrollX moves content)
     ctx.strokeStyle = C.axis
     ctx.lineWidth = 1
     ctx.beginPath()
@@ -513,8 +552,6 @@ function TimelineCanvas({
 
     ctx.font = `10px ${FONT}`
     ctx.textAlign = "center"
-    const minDopeLabelGapPx = 22
-    let lastDopeLabelX = -1e9
     const sortedDope = Array.from(frames.entries()).sort((a, b) => a[0] - b[0])
     for (const [frame, count] of sortedDope) {
       const x = toX(frame)
@@ -534,13 +571,6 @@ function TimelineCanvas({
         ctx.strokeRect(-sz / 2 - 1, -sz / 2 - 1, sz + 2, sz + 2)
       }
       ctx.restore()
-
-      if (x - lastDopeLabelX >= minDopeLabelGapPx) {
-        ctx.fillStyle = isSel ? C.diamondSel : C.dopeLabelNum
-        ctx.textBaseline = "top"
-        ctx.fillText(String(frame), x, dopeMid + DIAMOND + 3)
-        lastDopeLabelX = x
-      }
     }
 
     // Dopesheet label
@@ -580,21 +610,6 @@ function TimelineCanvas({
       ctx.closePath()
       ctx.fill()
     }
-
-    // ── Top-left badge ──
-    ctx.fillStyle = C.ruler
-    ctx.fillRect(0, 0, LABEL_W, RULER_H)
-    const badge = `F${String(Math.round(currentFrame)).padStart(3, "0")}`
-    ctx.font = `9px ${FONT}`
-    ctx.textAlign = "center"
-    ctx.textBaseline = "middle"
-    ctx.fillStyle = C.frameBadge
-    const bw = ctx.measureText(badge).width + 6
-    ctx.beginPath()
-    ctx.roundRect(LABEL_W / 2 - bw / 2, 2, bw, 12, 2)
-    ctx.fill()
-    ctx.fillStyle = C.frameBadgeText
-    ctx.fillText(badge, LABEL_W / 2, RULER_H / 2)
   }, [clip, pxPerFrame, scrollX, currentFrame, activeBone, visibleBones, selectedKeyframes, tab, getDopeFrames])
 
   useEffect(() => {
@@ -904,55 +919,86 @@ export function Timeline({
   return (
     <div className="flex h-full w-full select-none flex-col" style={{ fontFamily: FONT }}>
       {/* Toolbar — compact controls + channel tabs; axis hues stay exact via inline `t.color` when set */}
-      <div className="flex h-[26px] shrink-0 flex-nowrap items-center gap-1 border-b border-border bg-background px-1.5">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-5 min-w-[26px] shrink-0 px-0 font-mono text-[11px] text-muted-foreground"
-          onClick={() => setCurrentFrame(0)}
-        >
-          ⏮
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-5 min-w-[26px] shrink-0 px-0 font-mono text-[11px] text-muted-foreground"
-          onClick={() => setCurrentFrame((p) => Math.max(0, Math.round(typeof p === "number" ? p : 0) - 1))}
-        >
-          ◀
-        </Button>
+      <div className="flex h-[26px] shrink-0 flex-nowrap items-center gap-0.5 overflow-hidden border-b border-border bg-background px-1.5">
+        {/* Fixed square + Lucide icons — avoids uneven unicode box and mixed h-5 / h-[22px] misalignment */}
+        {(
+          [
+            {
+              key: "first",
+              el: <ChevronsLeft className="size-3.5" strokeWidth={1.75} />,
+              onClick: () => setCurrentFrame(0),
+            },
+            {
+              key: "prev",
+              el: <ChevronLeft className="size-3.5" strokeWidth={1.75} />,
+              onClick: () => setCurrentFrame((p) => Math.max(0, Math.round(typeof p === "number" ? p : 0) - 1)),
+            },
+          ] as const
+        ).map(({ key, el, onClick }) => (
+          <Button
+            key={key}
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "flex size-5 shrink-0 items-center justify-center overflow-hidden p-0 text-muted-foreground",
+              "hover:bg-transparent dark:hover:bg-transparent",
+              "active:bg-muted/50",
+              "focus-visible:outline-none focus-visible:ring-0",
+            )}
+            onClick={onClick}
+          >
+            {el}
+          </Button>
+        ))}
         <Button
           type="button"
           variant="secondary"
           size="sm"
           className={cn(
-            "h-[22px] min-w-[30px] shrink-0 rounded-md px-1.5 font-mono text-[11px]",
+            "flex size-5 shrink-0 items-center justify-center overflow-hidden p-0",
+            "focus-visible:outline-none focus-visible:ring-0",
             playing && "bg-[#d83838] text-[#0f0f12] hover:bg-[#d83838]/90",
+            !playing && "hover:bg-secondary/90",
           )}
           onClick={() => setPlaying((p) => !p)}
         >
-          {playing ? "⏸" : "▶"}
+          {playing ? (
+            <Pause className="size-3.5" strokeWidth={1.5} />
+          ) : (
+            <Play className="size-3.5 fill-current" strokeWidth={1.75} />
+          )}
         </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-5 min-w-[26px] shrink-0 px-0 font-mono text-[11px] text-muted-foreground"
-          onClick={() => setCurrentFrame((p) => Math.min(fc, Math.round(typeof p === "number" ? p : 0) + 1))}
-        >
-          ▶
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-5 min-w-[26px] shrink-0 px-0 font-mono text-[11px] text-muted-foreground"
-          onClick={() => setCurrentFrame(fc)}
-        >
-          ⏭
-        </Button>
+        {(
+          [
+            {
+              key: "next",
+              el: <ChevronRight className="size-3.5" strokeWidth={1.75} />,
+              onClick: () => setCurrentFrame((p) => Math.min(fc, Math.round(typeof p === "number" ? p : 0) + 1)),
+            },
+            {
+              key: "last",
+              el: <ChevronsRight className="size-3.5" strokeWidth={1.75} />,
+              onClick: () => setCurrentFrame(fc),
+            },
+          ] as const
+        ).map(({ key, el, onClick }) => (
+          <Button
+            key={key}
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "flex size-5 shrink-0 items-center justify-center overflow-hidden p-0 text-muted-foreground",
+              "hover:bg-transparent dark:hover:bg-transparent",
+              "active:bg-muted/50",
+              "focus-visible:outline-none focus-visible:ring-0",
+            )}
+            onClick={onClick}
+          >
+            {el}
+          </Button>
+        ))}
         <TransportFrameSlider
           frameCount={fc}
           value={currentFrame}
@@ -978,12 +1024,13 @@ export function Timeline({
               size="sm"
               onClick={() => setTab(t.key)}
               className={cn(
-                "h-5 min-h-5 shrink-0 rounded-md px-1.5 font-mono text-[10px]",
+                "h-5 max-h-5 min-h-5 shrink-0 overflow-hidden rounded-md px-1.5 font-mono text-[10px]",
+                "focus-visible:outline-none focus-visible:ring-0",
                 active
                   ? t.color
                     ? "text-[#0f0f12] hover:opacity-90"
                     : "bg-secondary text-foreground hover:bg-secondary/80"
-                  : "opacity-65 hover:opacity-100",
+                  : "opacity-65 hover:opacity-100 hover:bg-transparent dark:hover:bg-transparent active:bg-muted/50",
                 !active && !t.color && "text-muted-foreground",
               )}
               style={
