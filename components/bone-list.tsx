@@ -88,7 +88,7 @@ const BoneRow = memo(function BoneRow({
       </span>
       <span className="min-w-0 flex-1 truncate">{name}</span>
       {kfCount > 0 && (
-        <span className={cn("shrink-0 tabular-nums text-[10px]", isActive ? "text-blue-400/80" : "opacity-55")}>
+        <span className={cn("shrink-0 pr-1 tabular-nums text-[10px]", isActive ? "text-blue-400/80" : "opacity-55")}>
           [{kfCount}]
         </span>
       )}
@@ -174,7 +174,7 @@ export const BoneList = memo(function BoneList({
   }
 
   return (
-    <div ref={containerRef} className="h-full overflow-y-auto" onScroll={onScroll}>
+    <div ref={containerRef} className="h-full overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" onScroll={onScroll}>
       <div className="px-3 py-1 text-[11px] font-medium uppercase leading-tight tracking-widest text-muted-foreground">
         Bones
       </div>
