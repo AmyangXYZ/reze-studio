@@ -18,7 +18,6 @@ import {
   MenubarItem,
   MenubarMenu,
   MenubarSeparator,
-  MenubarShortcut,
   MenubarTrigger,
 } from "@/components/ui/menubar"
 import Link from "next/link"
@@ -38,10 +37,16 @@ import {
   loadClip as idbLoadClip,
   clearClip as idbClearClip,
 } from "@/lib/editor-persist"
+import packageJson from "../package.json"
 
 const MODEL_PATH = "/models/reze/reze.pmx"
+const APP_VERSION = packageJson.version
+const REPO_URL = "https://github.com/AmyangXYZ/reze-studio"
+const DOCS_README_URL = `${REPO_URL}/blob/main/README.md`
 const VMD_PATH = "/animations/miku.vmd"
 const STUDIO_ANIM_NAME = "studio"
+/** Basename for status bar when using bundled `MODEL_PATH` PMX. */
+const BUNDLED_PMX_FILENAME = MODEL_PATH.replace(/^.*\//, "") || "model.pmx"
 
 function emptyStudioClip(): AnimationClip {
   return { boneTracks: new Map(), morphTracks: new Map(), frameCount: 0 }
@@ -148,6 +153,12 @@ export default function Home() {
   const [pmxPickSelected, setPmxPickSelected] = useState("")
   /** Radix menubar: which submenu is open (`""` = all closed). */
   const [menubarValue, setMenubarValue] = useState("")
+  /** Bundled or uploaded `.pmx` file name for the status bar. */
+  const [statusPmxFileName, setStatusPmxFileName] = useState("—")
+  /** VS Code–style transient line (save feedback, errors, hints) — set from chrome later. */
+  const [statusMessage, setStatusMessage] = useState("")
+  /** Smoothed repaint FPS (same clock as the compositor; good enough for a readout). */
+  const [statusFps, setStatusFps] = useState<number | null>(null)
 
   const playRef = useRef(false)
   const lastT = useRef<number | null>(null)
@@ -258,6 +269,25 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKey)
   }, [frameCount])
 
+  // ─── Status bar: compositor FPS (cheap rolling average) ───────────────
+  useEffect(() => {
+    let raf = 0
+    let frames = 0
+    let lastReport = performance.now()
+    const loop = (now: number) => {
+      frames++
+      if (now - lastReport >= 400) {
+        const s = (now - lastReport) / 1000
+        setStatusFps(s > 0 ? Math.round(frames / s) : null)
+        frames = 0
+        lastReport = now
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
   // ─── Bone selection handlers ─────────────────────────────────────────
   const handleSelectGroup = useCallback((g: string) => {
     setSelectedGroup((prev) => (prev === g ? "" : g))
@@ -319,6 +349,7 @@ export default function Home() {
           setPmxBoneNames(new Set(sk))
           setModelBoneOrder(sk)
           setMorphNames(model.getMorphing().morphs.map((m) => m.name))
+          setStatusPmxFileName(BUNDLED_PMX_FILENAME)
           model.setMorphWeight("抗穿模", 0.5)
           engine.addGround({
             diffuseColor: new Vec3(0.14, 0.12, 0.16),
@@ -399,6 +430,7 @@ export default function Home() {
       setMorphNames([])
       setActiveMorph(null)
       setMorphWeightReadout(null)
+      setStatusPmxFileName("—")
       modelRef.current = null
       engineRef.current?.stopRenderLoop()
       engineRef.current?.dispose()
@@ -533,6 +565,7 @@ export default function Home() {
       model: Model,
       engineInstanceKey: string,
       displayStem: string,
+      pmxFileName: string,
       animationSnapshot: {
         clip: AnimationClip | null
         currentFrame: number
@@ -549,6 +582,7 @@ export default function Home() {
       setPmxBoneNames(boneSet)
       setModelBoneOrder(sk)
       setMorphNames(morphNamesList)
+      setStatusPmxFileName(pmxFileName.trim() || `${displayStem}.pmx`)
       setActiveBone((prev) => (prev && boneSet.has(prev) ? prev : null))
       setActiveMorph((prev) => (prev && morphSet.has(prev) ? prev : null))
       setSelectedKeyframes((prev) =>
@@ -612,7 +646,7 @@ export default function Home() {
         const model = await engine.loadModel(instanceKey, { files, pmxFile })
         await new Promise(resolve => requestAnimationFrame(resolve))
         model.setName(sanitizeClipFilenameBase(stem))
-        applyLoadedPmxModel(model, instanceKey, stem, {
+        applyLoadedPmxModel(model, instanceKey, stem, pmxFile.name, {
           clip: clipRef.current,
           currentFrame: currentFrameRef.current,
           playing: playRef.current,
@@ -740,7 +774,7 @@ export default function Home() {
           <div className="shrink-0 border-b">
             <div className="pl-2 pt-0 flex items-center justify-between pb-1">
               <h1 className="scroll-m-20 max-w-[11rem] text-md font-extrabold leading-tight tracking-tight text-balance">
-                REZE STUDIO <span className="text-[11px] ml-0.5 text-muted-foreground font-normal">v0.1.0</span>
+                REZE STUDIO
               </h1>
               <div className="flex shrink-0 items-center gap-0.5">
                 <Button variant="ghost" size="sm" asChild className="hover:bg-black hover:text-white rounded-full">
@@ -825,34 +859,57 @@ export default function Home() {
                     </MenubarGroup>
                   </MenubarContent>
                 </MenubarMenu>
-                <MenubarMenu value="edit">
+                <MenubarMenu value="help">
                   <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
-                    Edit
+                    Help
                   </MenubarTrigger>
-                  <MenubarContent sideOffset={4} className="min-w-[9rem] p-0.5 text-xs">
+                  <MenubarContent sideOffset={4} className="min-w-[11rem] p-0.5 text-xs">
                     <MenubarGroup>
-                      <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-xs" disabled>
-                        Undo
-                        <MenubarShortcut className="text-[10px] tracking-wide">⌘Z</MenubarShortcut>
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        asChild
+                      >
+                        <Link href={DOCS_README_URL} target="_blank" rel="noreferrer">
+                          Tutorial (README)
+                        </Link>
                       </MenubarItem>
-                      <MenubarItem className="gap-2 py-1 pl-2 pr-1.5 text-xs" disabled>
-                        Redo
-                        <MenubarShortcut className="text-[10px] tracking-wide">⇧⌘Z</MenubarShortcut>
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        disabled
+                      >
+                        Keyboard shortcuts…
+                      </MenubarItem>
+                      <MenubarSeparator className="my-0.5" />
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        onSelect={() => {
+                          window.alert(`Reze Studio ${APP_VERSION}\nWebGPU MMD editor — ${REPO_URL}`)
+                        }}
+                      >
+                        About Reze Studio
+                      </MenubarItem>
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        asChild
+                      >
+                        <Link href={`${REPO_URL}/issues`} target="_blank" rel="noreferrer">
+                          Report an issue
+                        </Link>
                       </MenubarItem>
                     </MenubarGroup>
                   </MenubarContent>
                 </MenubarMenu>
-                <MenubarMenu value="preferences">
+                <MenubarMenu value="settings">
                   <MenubarTrigger className="h-4 rounded-sm px-1.5 py-0 text-xs font-normal text-muted-foreground">
-                    Preferences
+                    Settings
                   </MenubarTrigger>
                   <MenubarContent sideOffset={4} className="min-w-[10rem] p-0.5 text-xs">
                     <MenubarGroup>
-                      <MenubarItem className="py-1 pl-2 pr-1.5 text-xs" disabled>
+                      <MenubarItem
+                        className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                        disabled
+                      >
                         Theme…
-                      </MenubarItem>
-                      <MenubarItem className="py-1 pl-2 pr-1.5 text-xs" disabled>
-                        Keyboard shortcuts…
                       </MenubarItem>
                     </MenubarGroup>
                   </MenubarContent>
@@ -961,6 +1018,45 @@ export default function Home() {
           </div>
         </aside>
       </div>
+
+      <footer
+        className="flex h-6 shrink-0 items-center gap-2 border-t border-border px-2 text-[10.5px] text-muted-foreground"
+        role="status"
+        aria-live="polite"
+      >
+        <div className="flex min-w-0 shrink-0 items-center gap-x-2 [overflow-wrap:anywhere]">
+          <span>
+            Model:{" "}
+            <span className="font-medium text-foreground" title={statusPmxFileName}>
+              {statusPmxFileName}
+            </span>
+          </span>
+          <span className="text-border" aria-hidden>
+            ·
+          </span>
+          <span>
+            Animation:{" "}
+            <span
+              className="font-medium text-foreground"
+              title={clip ? `${clipDisplayName}.vmd` : undefined}
+            >
+              {clip ? `${clipDisplayName}.vmd` : "—"}
+            </span>
+          </span>
+        </div>
+        <div className="min-w-0 flex-1 truncate px-2 text-left text-[10px] text-muted-foreground/90">
+          {statusMessage}
+        </div>
+        <div className="flex shrink-0 items-center gap-x-2 tabular-nums">
+          <span title="Main-thread / compositor frame rate">
+            {statusFps != null ? `${statusFps} FPS` : "— FPS"}
+          </span>
+          <span className="text-border" aria-hidden>
+            ·
+          </span>
+          <span>v{APP_VERSION}</span>
+        </div>
+      </footer>
     </div>
   )
 }
