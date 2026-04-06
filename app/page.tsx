@@ -165,6 +165,10 @@ export default function Home() {
   const [activeBone, setActiveBone] = useState<string | null>(null)
   const [selectedGroup, setSelectedGroup] = useState("All Bones")
   const [selectedKeyframes, setSelectedKeyframes] = useState<SelectedKeyframe[]>([])
+  /** Bumped on new clip load / reset so Timeline can reset its local view state. */
+  const [clipVersion, setClipVersion] = useState(0)
+  /** Lifted from Timeline so PropertiesInspector sliders + keyframe selection can sync it. */
+  const [timelineTab, setTimelineTab] = useState("allRot")
 
   /** Folder upload contained multiple `.pmx`; user picks one then clicks Load. */
   const [pmxPickFiles, setPmxPickFiles] = useState<File[] | null>(null)
@@ -538,13 +542,17 @@ export default function Home() {
     setCurrentFrame((c) => Math.min(c, frameCount))
   }, [frameCount])
 
-  // Timeline key click: jump playhead; curve keys also focus the bone on the list.
+  // Timeline key click: jump playhead; curve keys also focus the bone on the list
+  // and auto-switch the timeline channel tab to match the selected channel.
   useEffect(() => {
     if (selectedKeyframes.length !== 1) return
     const s = selectedKeyframes[0]
     setActiveMorph(null)
     if (s.type === "curve" && s.bone) setActiveBone(s.bone)
     setCurrentFrame(s.frame)
+    if (s.channel && ["rx", "ry", "rz", "tx", "ty", "tz"].includes(s.channel)) {
+      setTimelineTab(s.channel)
+    }
   }, [selectedKeyframes])
 
   const deleteSelectedKeyframes = useCallback(() => {
@@ -629,6 +637,8 @@ export default function Home() {
     setCurrentFrame(0)
     setPlaying(false)
     setSelectedKeyframes([])
+    setTimelineTab("allRot")
+    setClipVersion((v) => v + 1)
     model.show(STUDIO_ANIM_NAME)
     model.seek(0)
     if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
@@ -833,6 +843,9 @@ export default function Home() {
     setActiveBone(null)
     setActiveMorph(null)
     setSelectedKeyframes([])
+    setTimelineTab("allRot")
+    // Bump after clearing selections so downstream effects don't see stale keyframes.
+    setClipVersion((v) => v + 1)
     model.show(STUDIO_ANIM_NAME)
     model.seek(0)
     void idbClearClip()
@@ -889,6 +902,9 @@ export default function Home() {
               visibleBones={visibleBones}
               selectedKeyframes={selectedKeyframes}
               setSelectedKeyframes={setSelectedKeyframes}
+              clipVersion={clipVersion}
+              tab={timelineTab}
+              setTab={setTimelineTab}
             />
           </div>
         </div>
@@ -913,6 +929,9 @@ export default function Home() {
               livePose={livePose}
               onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
               onDeleteSelectedKeyframes={deleteSelectedKeyframes}
+              timelineTab={timelineTab}
+              setTimelineTab={setTimelineTab}
+              clipVersion={clipVersion}
             />
           </div>
         </aside>

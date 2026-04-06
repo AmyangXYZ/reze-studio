@@ -1,7 +1,7 @@
 "use client"
 
 import type { Dispatch, RefObject, SetStateAction } from "react"
-import { memo, useCallback, useMemo, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { AnimationClip, BoneInterpolation, BoneKeyframe, Model } from "reze-engine"
 import { Quat, Vec3 } from "reze-engine"
 import { Button } from "@/components/ui/button"
@@ -108,6 +108,9 @@ interface PropertiesInspectorProps {
   } | null
   onInsertKeyframeAtPlayhead: () => void
   onDeleteSelectedKeyframes: () => void
+  timelineTab: string
+  setTimelineTab: (tab: string) => void
+  clipVersion: number
 }
 
 export const PropertiesInspector = memo(function PropertiesInspector({
@@ -122,6 +125,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   livePose,
   onInsertKeyframeAtPlayhead,
   onDeleteSelectedKeyframes,
+  timelineTab,
+  setTimelineTab,
+  clipVersion,
 }: PropertiesInspectorProps) {
   const fPlay = Math.round(currentFrame)
   const singleSel = selectedKeyframes.length === 1 ? selectedKeyframes[0] : null
@@ -131,6 +137,25 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   const canInsert = !!(clip && activeBone && !activeMorph)
 
   const [ipTab, setIpTab] = useState<IpTab>("rot")
+
+  // Reset interpolation tab when a new clip is loaded.
+  const clipVersionRef = useRef(clipVersion)
+  useEffect(() => {
+    if (clipVersionRef.current === clipVersion) return
+    clipVersionRef.current = clipVersion
+    setIpTab("rot")
+  }, [clipVersion])
+
+  // Auto-switch interpolation tab when a keyframe with a specific channel is selected.
+  useEffect(() => {
+    if (selectedKeyframes.length !== 1) return
+    const ch = selectedKeyframes[0].channel
+    if (!ch) return
+    if (ch === "rx" || ch === "ry" || ch === "rz") setIpTab("rot")
+    else if (ch === "tx") setIpTab("tx")
+    else if (ch === "ty") setIpTab("ty")
+    else if (ch === "tz") setIpTab("tz")
+  }, [selectedKeyframes])
 
   /** Last key at or before playhead — owns outgoing handles to the next key. */
   const kfSample = clip && activeBone ? sampleBoneKeyframe(clip, activeBone, currentFrame) : null
@@ -250,7 +275,10 @@ export const PropertiesInspector = memo(function PropertiesInspector({
                 max={ROT_RANGE.max}
                 decimals={2}
                 disabled={!clip}
-                onChange={(v) => setRotationAxis(i as 0 | 1 | 2, v)}
+                onChange={(v) => {
+                  setRotationAxis(i as 0 | 1 | 2, v)
+                  setTimelineTab(ch.key)
+                }}
               />
             ))
           ) : (
@@ -271,7 +299,10 @@ export const PropertiesInspector = memo(function PropertiesInspector({
                 max={TRA_RANGE.max}
                 decimals={3}
                 disabled={!clip}
-                onChange={(v) => setTranslationAxis(i as 0 | 1 | 2, v)}
+                onChange={(v) => {
+                  setTranslationAxis(i as 0 | 1 | 2, v)
+                  setTimelineTab(ch.key)
+                }}
               />
             ))
           ) : (

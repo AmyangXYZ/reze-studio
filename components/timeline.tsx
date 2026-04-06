@@ -910,6 +910,11 @@ interface TimelineProps {
   visibleBones: string[]
   selectedKeyframes: SelectedKeyframe[]
   setSelectedKeyframes: (kfs: SelectedKeyframe[] | ((prev: SelectedKeyframe[]) => SelectedKeyframe[])) => void
+  /** Bumped on new clip load / reset — triggers local view state reset. */
+  clipVersion: number
+  /** Lifted channel tab state — synced from keyframe selection and slider interactions. */
+  tab: string
+  setTab: (tab: string) => void
 }
 
 export const Timeline = memo(function Timeline({
@@ -923,6 +928,9 @@ export const Timeline = memo(function Timeline({
   visibleBones,
   selectedKeyframes,
   setSelectedKeyframes,
+  clipVersion,
+  tab,
+  setTab,
 }: TimelineProps) {
   const fc = clip?.frameCount ?? 0
   const [endDraft, setEndDraft] = useState<string | null>(null)
@@ -932,7 +940,6 @@ export const Timeline = memo(function Timeline({
   const [scrollX, setScrollX] = useState(0)
   const scrollXRef = useRef(0)
   scrollXRef.current = scrollX
-  const [tab, setTab] = useState("allRot")
   const [, forceRedraw] = useState(0)
   const timelineAreaRef = useRef<HTMLDivElement>(null)
   const [trackWidth, setTrackWidth] = useState(0)
@@ -951,6 +958,16 @@ export const Timeline = memo(function Timeline({
   useEffect(() => {
     setPxPerFrame((p) => Math.min(MAX_PX, Math.max(minPxPerFrame, p)))
   }, [minPxPerFrame])
+
+  // Reset local view state when a new clip is loaded or editor is reset.
+  const clipVersionRef = useRef(clipVersion)
+  useEffect(() => {
+    if (clipVersionRef.current === clipVersion) return
+    clipVersionRef.current = clipVersion
+    setScrollX(0)
+    setPxPerFrame(4)
+    setEndDraft(null)
+  }, [clipVersion])
 
   // Clamp scroll when viewport or clip size changes (NOT on pxPerFrame — zoom handles its own scroll)
   useEffect(() => {
