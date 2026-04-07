@@ -717,14 +717,21 @@ function TimelineCanvas({
         ctx.textBaseline = "top"
         const readoutX = isRight ? LABEL_W + 8 : w - 8
         ctx.textAlign = isRight ? "left" : "right"
+        // Fixed-width formatting so columns line up: pad sign + integer part to a
+        // common width per group so the decimal points align across rows.
+        const isRotGroup = channels[0].group === "rot"
+        const numWidth = isRotGroup ? 7 : 6 // e.g. "-180.0", " -5.7"
+        const formatVal = (v: number) => {
+          const s = isRotGroup ? `${v.toFixed(1)}°` : v.toFixed(2)
+          return s.padStart(numWidth, " ")
+        }
         channels.forEach((ch, i) => {
           let val = 0
           for (const k of keyframes) {
             if (k.frame <= currentFrame) val = ch.get(k)
           }
           ctx.fillStyle = ch.color
-          const display = ch.group === "rot" ? `${val.toFixed(1)}°` : val.toFixed(2)
-          ctx.fillText(`${ch.label}: ${display}`, readoutX, curveTop + 5 + i * 13)
+          ctx.fillText(`${ch.label}: ${formatVal(val)}`, readoutX, curveTop + 5 + i * 13)
         })
       } else {
         ctx.fillStyle = C.label
