@@ -7,7 +7,7 @@ import {
   useLayoutEffect,
   useCallback,
   useMemo,
-  type MutableRefObject,
+  type RefObject,
 } from "react"
 import {
   ChevronLeft,
@@ -132,7 +132,7 @@ function getAxisConfig(tab: string) {
   if (isRot) {
     return { min: -90, max: 90, unit: "°", side: "left" as const, step: 30, subStep: 15 }
   } else {
-    return { min: -5, max: 20, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
+    return { min: -10, max: 10, unit: "", side: "left" as const, step: 5, subStep: 2.5 }
   }
 }
 
@@ -378,10 +378,17 @@ interface TimelineCanvasProps {
   ) => void
   onMoveCurveKeyframe: (bone: string, kfRef: BoneKeyframe, channel: string, toFrame: number, dv: number) => void
   onMoveMorphKeyframe: (morph: string, kfRef: MorphKeyframe, toFrame: number, dw: number) => void
+  /** Fired on mouseup/mouseleave at the end of a keyframe drag. Parent uses
+   *  this to commit the clip once (for undo/redo + engine upload) instead of
+   *  per-mousemove. */
+  onEndKeyframeDrag: () => void
+  /** Imperative repaint hook — bumps the static-cache drag version and redraws
+   *  the canvas without a React state update. Populated by TimelineCanvas. */
+  dragRedrawRef?: RefObject<(() => void) | null>
   /** Imperative draw handle: playback rAF loop writes the latest frame directly
    *  via `ref.current(frame)`, bypassing React reconciliation for 60Hz playhead
    *  updates. Populated by TimelineCanvas on mount. */
-  playheadDrawRef?: MutableRefObject<((frame: number) => void) | null>
+  playheadDrawRef?: RefObject<((frame: number) => void) | null>
 }
 
 function TimelineCanvas({
@@ -400,7 +407,9 @@ function TimelineCanvas({
   onMoveDopeKeyframe,
   onMoveCurveKeyframe,
   onMoveMorphKeyframe,
+  onEndKeyframeDrag,
   playheadDrawRef,
+  dragRedrawRef,
 }: TimelineCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   /** Latest frame for the draw closure to read — keeps `currentFrame` out of
@@ -423,6 +432,7 @@ function TimelineCanvas({
     visibleBones: readonly string[] | null
     selectedKeyframes: readonly SelectedKeyframe[] | null
     tab: string
+    dragVersion: number
   }>({
     w: 0,
     h: 0,
@@ -435,7 +445,13 @@ function TimelineCanvas({
     visibleBones: null,
     selectedKeyframes: null,
     tab: "",
+    dragVersion: 0,
   })
+  /** Bumped by parent via `dragRedrawRef` while a keyframe drag is in progress.
+   *  Participates in static-cache invalidation so in-place mutations repaint
+   *  without needing a new clip reference (which would cascade a commit +
+   *  engine clip reupload per mousemove). */
+  const dragVersionRef = useRef(0)
   const drag = useRef<{
     type: string
     bone?: string
@@ -504,7 +520,8 @@ function TimelineCanvas({
       cache.selectedMorph !== selectedMorph ||
       cache.visibleBones !== visibleBones ||
       cache.selectedKeyframes !== selectedKeyframes ||
-      cache.tab !== tab
+      cache.tab !== tab ||
+      cache.dragVersion !== dragVersionRef.current
 
     const ox = LABEL_W - scrollX
     const dopeY = h - DOPE_H
@@ -845,6 +862,7 @@ function TimelineCanvas({
       cache.visibleBones = visibleBones
       cache.selectedKeyframes = selectedKeyframes
       cache.tab = tab
+      cache.dragVersion = dragVersionRef.current
     }
 
     // ── Composite cached static layer onto the visible canvas ──
@@ -940,6 +958,20 @@ function TimelineCanvas({
       if (playheadDrawRef.current) playheadDrawRef.current = null
     }
   }, [draw, playheadDrawRef])
+
+  // Publish the drag-redraw handle. Parent drag callbacks mutate keyframes
+  // in place then invoke this to invalidate the static cache and repaint —
+  // no React state updates, no clip commits, no engine re-uploads.
+  useEffect(() => {
+    if (!dragRedrawRef) return
+    dragRedrawRef.current = () => {
+      dragVersionRef.current++
+      draw()
+    }
+    return () => {
+      if (dragRedrawRef.current) dragRedrawRef.current = null
+    }
+  }, [draw, dragRedrawRef])
 
   useEffect(() => {
     const el = canvasRef.current
@@ -1155,9 +1187,13 @@ function TimelineCanvas({
     [hitTest, pxPerFrame, yZoom, scrollX, clip, tab, onSetCurrentFrame, onMoveDopeKeyframe, onMoveCurveKeyframe, onMoveMorphKeyframe],
   )
 
-  const onMouseUp = useCallback(() => {
+  const endDrag = useCallback(() => {
+    const d = drag.current
     drag.current = null
-  }, [])
+    if (d && (d.type === "dope" || d.type === "curve" || d.type === "morph-curve")) {
+      onEndKeyframeDrag()
+    }
+  }, [onEndKeyframeDrag])
 
   return (
     <canvas
@@ -1165,10 +1201,8 @@ function TimelineCanvas({
       style={{ width: "100%", height: "100%", display: "block" }}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
-      onMouseUp={onMouseUp}
-      onMouseLeave={() => {
-        drag.current = null
-      }}
+      onMouseUp={endDrag}
+      onMouseLeave={endDrag}
     />
   )
 }
@@ -1182,7 +1216,7 @@ interface TimelineProps {
   tab: string
   setTab: (tab: string) => void
   /** Imperative playhead draw handle — see TimelineCanvasProps. */
-  playheadDrawRef?: MutableRefObject<((frame: number) => void) | null>
+  playheadDrawRef?: RefObject<((frame: number) => void) | null>
 }
 
 export function Timeline({
@@ -1210,7 +1244,6 @@ export function Timeline({
   const [scrollX, setScrollX] = useState(0)
   const scrollXRef = useRef(0)
   scrollXRef.current = scrollX
-  const [, forceRedraw] = useState(0)
   const timelineAreaRef = useRef<HTMLDivElement>(null)
   const [trackWidth, setTrackWidth] = useState(0)
 
@@ -1358,6 +1391,18 @@ export function Timeline({
     [setSelectedKeyframes],
   )
 
+  // ─── Imperative drag path ───────────────────────────────────────────
+  //     Drag move callbacks mutate keyframes in place and trigger a canvas
+  //     repaint via `dragRedrawRef` — no React state updates, no clip
+  //     commits, no engine clip reuploads. The single commit happens in
+  //     `onEndKeyframeDrag` on mouseup, which cascades once:
+  //       studio store → EngineBridge `loadClip` + seek → Timeline repaint.
+  //     `selectedKeyframes` entries are mutated in place so the highlighted
+  //     diamonds track the drag; on end, we clone the array to notify the
+  //     store for downstream subscribers (inspector, etc.).
+  const dragRedrawRef = useRef<(() => void) | null>(null)
+  const dragTouchedRef = useRef(false)
+
   const onMoveDopeKeyframe = useCallback(
     (
       boneRefs: Array<{ bone: string; kf: BoneKeyframe }>,
@@ -1366,35 +1411,23 @@ export function Timeline({
     ) => {
       if (!clip) return
       const clamped = Math.max(0, toFrame)
-      // Use the first ref's old frame as the "from" identifier for selection updates
-      const fromFrame =
-        boneRefs[0]?.kf.frame ?? morphRefs[0]?.kf.frame
+      const fromFrame = boneRefs[0]?.kf.frame ?? morphRefs[0]?.kf.frame
       if (fromFrame === undefined || clamped === fromFrame) return
       for (const { bone, kf } of boneRefs) {
         kf.frame = clamped
-        const track = clip.boneTracks.get(bone)
-        track?.sort((a, b) => a.frame - b.frame)
+        clip.boneTracks.get(bone)?.sort((a, b) => a.frame - b.frame)
       }
       for (const { morph, kf } of morphRefs) {
         kf.frame = clamped
-        const track = clip.morphTracks.get(morph)
-        track?.sort((a, b) => a.frame - b.frame)
+        clip.morphTracks.get(morph)?.sort((a, b) => a.frame - b.frame)
       }
-      setSelectedKeyframes((prev) =>
-        prev.map((s) => (s.frame === fromFrame && s.type === "dope" ? { ...s, frame: clamped } : s)),
-      )
-      commit((c) =>
-        c
-          ? {
-              ...c,
-              boneTracks: boneRefs.length ? new Map(c.boneTracks) : c.boneTracks,
-              morphTracks: morphRefs.length ? new Map(c.morphTracks) : c.morphTracks,
-            }
-          : null,
-      )
-      forceRedraw((n) => n + 1)
+      for (const s of selectedKeyframes) {
+        if (s.type === "dope" && s.frame === fromFrame) (s as { frame: number }).frame = clamped
+      }
+      dragTouchedRef.current = true
+      dragRedrawRef.current?.()
     },
-    [clip, setSelectedKeyframes, commit],
+    [clip, selectedKeyframes],
   )
 
   const onMoveCurveKeyframe = useCallback(
@@ -1410,20 +1443,17 @@ export function Timeline({
       }
       if (dv) {
         const ch = ALL_CHANNELS.find((c) => c.key === chKey)
-        if (ch) {
-          const cur = ch.get(kfRef)
-          ch.set(kfRef, cur + dv)
+        if (ch) ch.set(kfRef, ch.get(kfRef) + dv)
+      }
+      for (const s of selectedKeyframes) {
+        if (s.bone === bone && s.channel === chKey && s.frame === fromFrame) {
+          ;(s as { frame: number }).frame = clamped
         }
       }
-      setSelectedKeyframes((prev) =>
-        prev.map((s) =>
-          s.bone === bone && s.frame === fromFrame && s.channel === chKey ? { ...s, frame: clamped } : s,
-        ),
-      )
-      commit((c) => (c ? { ...c, boneTracks: new Map(c.boneTracks) } : null))
-      forceRedraw((n) => n + 1)
+      dragTouchedRef.current = true
+      dragRedrawRef.current?.()
     },
-    [clip, setSelectedKeyframes, commit],
+    [clip, selectedKeyframes],
   )
 
   const onMoveMorphKeyframe = useCallback(
@@ -1437,17 +1467,28 @@ export function Timeline({
         kfRef.frame = clamped
         track.sort((a, b) => a.frame - b.frame)
       }
-      if (dw) {
-        kfRef.weight = Math.max(0, Math.min(1, kfRef.weight + dw))
+      if (dw) kfRef.weight = Math.max(0, Math.min(1, kfRef.weight + dw))
+      for (const s of selectedKeyframes) {
+        if (s.morph === morph && s.frame === fromFrame) (s as { frame: number }).frame = clamped
       }
-      setSelectedKeyframes((prev) =>
-        prev.map((s) => (s.morph === morph && s.frame === fromFrame ? { ...s, frame: clamped } : s)),
-      )
-      commit((c) => (c ? { ...c, morphTracks: new Map(c.morphTracks) } : null))
-      forceRedraw((n) => n + 1)
+      dragTouchedRef.current = true
+      dragRedrawRef.current?.()
     },
-    [clip, setSelectedKeyframes, commit],
+    [clip, selectedKeyframes],
   )
+
+  const onEndKeyframeDrag = useCallback(() => {
+    if (!dragTouchedRef.current) return
+    dragTouchedRef.current = false
+    // Single commit for the whole drag — this is what lands in undo/redo and
+    // triggers the engine reupload via EngineBridge.
+    commit((c) =>
+      c ? { ...c, boneTracks: new Map(c.boneTracks), morphTracks: new Map(c.morphTracks) } : null,
+    )
+    // Notify selection subscribers with a new array reference (entries were
+    // already mutated in place during the drag).
+    setSelectedKeyframes((prev) => [...prev])
+  }, [commit, setSelectedKeyframes])
 
   return (
     <div className="flex h-full w-full select-none flex-col" style={{ fontFamily: FONT }}>
@@ -1655,7 +1696,9 @@ export function Timeline({
             onMoveDopeKeyframe={onMoveDopeKeyframe}
             onMoveCurveKeyframe={onMoveCurveKeyframe}
             onMoveMorphKeyframe={onMoveMorphKeyframe}
+            onEndKeyframeDrag={onEndKeyframeDrag}
             playheadDrawRef={innerDrawRef}
+            dragRedrawRef={dragRedrawRef}
           />
         ) : (
           <div

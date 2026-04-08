@@ -36,6 +36,13 @@ import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback } from "@/context/playback-context"
 import {
+  EngineBridge,
+  STUDIO_ANIM_NAME,
+  fileStem,
+  sanitizeClipFilenameBase,
+} from "@/components/engine-bridge"
+import { StudioStatusFooter, useStudioStatusActions } from "@/components/studio-status"
+import {
   DEFAULT_STUDIO_CLIP_FRAMES,
   interpolationTemplateForFrame,
   readLocalPoseAfterSeek,
@@ -43,14 +50,9 @@ import {
 } from "@/lib/utils"
 import packageJson from "../package.json"
 
-const MODEL_PATH = "/models/reze/reze.pmx"
 const APP_VERSION = packageJson.version
 const REPO_URL = "https://github.com/AmyangXYZ/reze-studio"
 const DOCS_README_URL = `${REPO_URL}/blob/main/README.md`
-const VMD_PATH = "/animations/miku.vmd"
-const STUDIO_ANIM_NAME = "studio"
-/** Basename for status bar when using bundled `MODEL_PATH` PMX. */
-const BUNDLED_PMX_FILENAME = MODEL_PATH.replace(/^.*\//, "") || "model.pmx"
 
 function emptyStudioClip(): AnimationClip {
   return { boneTracks: new Map(), morphTracks: new Map(), frameCount: DEFAULT_STUDIO_CLIP_FRAMES }
@@ -93,20 +95,6 @@ function downloadBlob(blob: Blob, filename: string) {
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
-}
-
-/** Stem of a path or file name (`/animations/miku.vmd` → `miku`). */
-function fileStem(pathOrName: string): string {
-  const base = pathOrName.replace(/^.*[/\\]/, "")
-  const i = base.lastIndexOf(".")
-  return (i > 0 ? base.slice(0, i) : base).trim() || "clip"
-}
-
-/** One safe path segment for downloads (no slashes or reserved characters). */
-function sanitizeClipFilenameBase(name: string): string {
-  const s = name.trim() || "clip"
-  const cleaned = s.replace(/[/\\<>:"|?*\x00-\x1f]/g, "-").replace(/-+/g, "-")
-  return cleaned.slice(0, 120).replace(/^-|-$/g, "") || "clip"
 }
 
 /** Reuse `livePose` object when floats haven’t moved — keeps memo’d Properties from reconciling every RAF. */
@@ -381,56 +369,6 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   )
 })
 
-const StudioStatusFooter = memo(function StudioStatusFooter({
-  statusPmxFileName,
-  clipDisplayName,
-  hasClip,
-  statusMessage,
-  statusFps,
-  appVersion,
-}: {
-  statusPmxFileName: string
-  clipDisplayName: string
-  hasClip: boolean
-  statusMessage: string
-  statusFps: number | null
-  appVersion: string
-}) {
-  return (
-    <footer
-      className="flex h-6 shrink-0 items-center gap-2 border-t border-border px-2 text-[10.5px] text-muted-foreground"
-      role="status"
-      aria-live="polite"
-    >
-      <div className="flex min-w-0 shrink-0 items-center gap-x-2 [overflow-wrap:anywhere]">
-        <span>
-          Model:{" "}
-          <span className="font-medium text-foreground" title={statusPmxFileName}>
-            {statusPmxFileName}
-          </span>
-        </span>
-        <span className="text-border" aria-hidden>
-          ·
-        </span>
-        <span>
-          Animation:{" "}
-          <span className="font-medium text-foreground" title={hasClip ? `${clipDisplayName}.vmd` : undefined}>
-            {hasClip ? `${clipDisplayName}.vmd` : "—"}
-          </span>
-        </span>
-      </div>
-      <div className="min-w-0 flex-1 truncate px-2 text-left text-[10px] text-muted-foreground/90">{statusMessage}</div>
-      <div className="flex shrink-0 items-center gap-x-2 tabular-nums">
-        <span title="Main-thread / compositor frame rate">{statusFps != null ? `${statusFps} FPS` : "— FPS"}</span>
-        <span className="text-border" aria-hidden>
-          ·
-        </span>
-        <span>v{appVersion}</span>
-      </div>
-    </footer>
-  )
-})
-
 export function StudioPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const engineRef = useRef<Engine | null>(null)
@@ -488,15 +426,16 @@ export function StudioPage() {
   const [pmxPickSelected, setPmxPickSelected] = useState("")
   /** Radix menubar: which submenu is open (`""` = all closed). */
   const [menubarValue, setMenubarValue] = useState("")
-  /** Bundled or uploaded `.pmx` file name for the status bar. */
-  const [statusPmxFileName, setStatusPmxFileName] = useState("—")
-  /** VS Code–style transient line (save feedback, errors, hints) — set from chrome later. */
-  const [statusMessage, setStatusMessage] = useState("")
-  /** Render FPS from `Engine.getStats()` (updated inside the engine render path, ~1s window). */
-  const [statusFps, setStatusFps] = useState<number | null>(null)
-  const lastReportedEngineFpsRef = useRef<number | null>(null)
+  /** Status bar push actions — footer subscribes to its own store so these
+   *  writes do not re-render the page. */
+  const { setPmxFileName: setStatusPmxFileName } = useStudioStatusActions()
 
+  /** `playing` mirrored into a ref for use inside async file handlers (PMX swap
+   *  captures the value before `await loadModel` and restores it after). */
   const playRef = useRef(false)
+  useEffect(() => {
+    playRef.current = playing
+  }, [playing])
   /** Imperative handle into the timeline canvas — the playback rAF loop uses
    *  this to repaint the playhead at 60Hz without re-rendering React. */
   const playheadDrawRef = useRef<((frame: number) => void) | null>(null)
@@ -543,50 +482,10 @@ export function StudioPage() {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       if (!documentDirtyRef.current) return
       e.preventDefault()
-      e.returnValue = ""
     }
     window.addEventListener("beforeunload", onBeforeUnload)
     return () => window.removeEventListener("beforeunload", onBeforeUnload)
   }, [])
-
-  // ─── Playback loop ───────────────────────────────────────────────────
-  // While playing, the engine owns the timeline (advances pose every render).
-  // React's job is to MIRROR the engine's clock into `currentFrame` so the UI
-  // (timeline playhead, readouts) stays in sync — not to drive it. No dt math,
-  // no double-seek.
-  useEffect(() => {
-    playRef.current = playing
-    if (!playing) return
-    if (frameCount <= 0) return
-    const model = modelRef.current
-    if (!model) return
-    let raf: number
-    const tick = () => {
-      if (!playRef.current) return
-      const m = modelRef.current
-      if (!m) return
-      const progress = m.getAnimationProgress()
-      const frame = progress.current * 30
-      if (frame >= frameCount) {
-        setCurrentFrame(frameCount)
-        setPlaying(false)
-        return
-      }
-      // Pure imperative path — no React state updates during playback.
-      // `currentFrameRef` + `playheadDrawRef(frame)` drive the visual playhead
-      // at monitor refresh rate with zero reconciliation cost.
-      currentFrameRef.current = frame
-      playheadDrawRef.current?.(frame)
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => {
-      cancelAnimationFrame(raf)
-      // Flush the last drawn frame into React state so the paused view matches
-      // what the playhead was last showing (throttled sync may lag by up to 100ms).
-      setCurrentFrame(currentFrameRef.current)
-    }
-  }, [playing, frameCount, setCurrentFrame, setPlaying])
 
   // ─── Keyboard shortcuts ──────────────────────────────────────────────
   useEffect(() => {
@@ -651,150 +550,8 @@ export function StudioPage() {
     setSelectedKeyframes((prev) => prev.filter((s) => s.type !== "curve" || !s.bone || pmxBoneNames.has(s.bone)))
   }, [pmxBoneNames, setSelectedKeyframes])
 
-  // ─── Engine init ─────────────────────────────────────────────────────
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const el = canvas
-
-    let disposed = false
-
-    async function initEngine() {
-      try {
-        const engine = new Engine(el, {
-          ambientColor: new Vec3(0.86, 0.84, 0.88),
-          cameraDistance: 31.5,
-          cameraTarget: new Vec3(0, 11.5, 0),
-        })
-
-        await engine.init()
-        if (disposed) return
-
-        try {
-          const model = await engine.loadModel("reze", MODEL_PATH)
-          if (disposed) return
-          modelRef.current = model
-          const sk = model.getSkeleton().bones.map((b) => b.name)
-          setPmxBoneNames(new Set(sk))
-          setModelBoneOrder(sk)
-          setMorphNames(model.getMorphing().morphs.map((m) => m.name))
-          setStatusPmxFileName(BUNDLED_PMX_FILENAME)
-          model.setMorphWeight("抗穿模", 0.5)
-          engine.addGround({
-            diffuseColor: new Vec3(0.14, 0.12, 0.16),
-          })
-        } catch {
-          setEngineError(`Add model at public${MODEL_PATH}`)
-        }
-
-        lastReportedEngineFpsRef.current = null
-        engine.runRenderLoop(() => {
-          const fps = engine.getStats().fps
-          if (fps === lastReportedEngineFpsRef.current) return
-          lastReportedEngineFpsRef.current = fps
-          setStatusFps(fps > 0 ? fps : null)
-        })
-
-        try {
-          await modelRef.current?.loadVmd(STUDIO_ANIM_NAME, VMD_PATH)
-          if (disposed) return
-          const c = modelRef.current?.getClip(STUDIO_ANIM_NAME)
-          if (c) {
-            suppressClipDirtyRef.current += 1
-            commit(c)
-            documentDirtyRef.current = false
-            setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
-            modelRef.current?.show(STUDIO_ANIM_NAME)
-            modelRef.current?.seek(0)
-            if (modelRef.current?.name === "reze") modelRef.current?.setMorphWeight("抗穿模", 0.5)
-          }
-        } catch (e) {
-          console.warn(`VMD load failed — add file at public${VMD_PATH}`, e)
-        }
-        setStudioReady(true)
-
-        engineRef.current = engine
-      } catch (e) {
-        console.error(e)
-        setEngineError(e instanceof Error ? e.message : String(e))
-      }
-    }
-
-    void initEngine()
-
-    return () => {
-      disposed = true
-      setStudioReady(false)
-      setModelBoneOrder([])
-      setPmxBoneNames(new Set())
-      setMorphNames([])
-      setSelectedMorph(null)
-      setMorphWeightReadout(null)
-      setStatusPmxFileName("—")
-      setStatusFps(null)
-      lastReportedEngineFpsRef.current = null
-      modelRef.current = null
-      engineRef.current?.stopRenderLoop()
-      engineRef.current?.dispose()
-      engineRef.current = null
-    }
-  }, [commit, setClipDisplayName, setSelectedMorph])
-
-  // Upload clip to engine ONLY on edits — never on playhead movement. After upload
-  // we re-seek the engine to the current React frame so a commit during pause
-  // doesn't snap the viewport back to frame 0.
-  useEffect(() => {
-    const model = modelRef.current
-    if (!model || !clip) return
-    model.loadClip(STUDIO_ANIM_NAME, clip)
-    model.seek(Math.max(0, currentFrameRef.current) / 30)
-  }, [clip])
-
-  // Scrub: when paused, React owns the playhead and pushes seeks into the engine.
-  // When playing, the engine owns the playhead — we read FROM it via the rAF loop
-  // below and must NOT seek here (would fight the engine's own timeline).
-  useLayoutEffect(() => {
-    const model = modelRef.current
-    if (!model || !clip) return
-    if (!playing) {
-      model.seek(Math.max(0, currentFrame) / 30)
-    }
-    if (!selectedMorph) {
-      setMorphWeightReadout(null)
-      return
-    }
-    const morphing = model.getMorphing()
-    const idx = morphing.morphs.findIndex((m) => m.name === selectedMorph)
-    if (idx < 0) {
-      setMorphWeightReadout(null)
-      return
-    }
-    const w = model.getMorphWeights()[idx]
-    setMorphWeightReadout((prev) => (prev === w ? prev : w))
-  }, [currentFrame, clip, selectedMorph, playing])
-
-  useEffect(() => {
-    const model = modelRef.current
-    if (!model || !clip) return
-    if (playing) {
-      // Make sure the engine starts from the React playhead. If the user pressed
-      // play at the end, rewind to 0 first (and mirror that into React state).
-      let startFrame = currentFrameRef.current
-      if (startFrame >= frameCount) {
-        startFrame = 0
-        setCurrentFrame(0)
-      }
-      model.seek(Math.max(0, startFrame) / 30)
-      model.play()
-      if (model.name === "reze") {
-        model.setMorphWeight("抗穿模", 0.5)
-      }
-    } else model.pause()
-  }, [playing, clip, frameCount, setCurrentFrame])
-
-  useEffect(() => {
-    setCurrentFrame((c) => Math.min(c, frameCount))
-  }, [frameCount, setCurrentFrame])
+  // Engine init, clip upload, scrub/seek, play/pause, clamp, playback rAF
+  // loop all live in <EngineBridge /> below — StudioPage just owns chrome.
 
   // Timeline key click: jump playhead; curve keys focus bone/morph on the list — tab stays user-controlled.
   useEffect(() => {
@@ -1172,6 +929,21 @@ export function StudioPage() {
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
+      <EngineBridge
+        canvasRef={canvasRef}
+        engineRef={engineRef}
+        modelRef={modelRef}
+        currentFrameRef={currentFrameRef}
+        playheadDrawRef={playheadDrawRef}
+        documentDirtyRef={documentDirtyRef}
+        suppressClipDirtyRef={suppressClipDirtyRef}
+        setPmxBoneNames={setPmxBoneNames}
+        setModelBoneOrder={setModelBoneOrder}
+        setMorphNames={setMorphNames}
+        setEngineError={setEngineError}
+        setStudioReady={setStudioReady}
+        setMorphWeightReadout={setMorphWeightReadout}
+      />
       <div className="flex min-h-0 flex-1">
         <StudioLeftPanel
           vmdInputRef={vmdInputRef}
@@ -1233,11 +1005,8 @@ export function StudioPage() {
       </div>
 
       <StudioStatusFooter
-        statusPmxFileName={statusPmxFileName}
         clipDisplayName={clipDisplayName}
         hasClip={clip != null}
-        statusMessage={statusMessage}
-        statusFps={statusFps}
         appVersion={APP_VERSION}
       />
     </div>

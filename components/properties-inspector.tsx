@@ -17,13 +17,12 @@ import { InterpolationCurveEditor, PRESETS, type CurvePoint } from "@/components
 import {
   cloneBoneInterpolation,
   cn,
+  interpolationTemplateForFrame,
   readLocalPoseAfterSeek,
-  upsertBoneKeyframeAtFrame,
-  upsertMorphKeyframeAtFrame,
   VMD_LINEAR_DEFAULT_IP,
 } from "@/lib/utils"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
-import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
+import { usePlaybackFrameRef, usePlaybackSelector } from "@/context/playback-context"
 
 /** Must match `loadClip` name in app/page (engine clip vs React state). */
 const STUDIO_ANIM_NAME = "studio"
@@ -177,70 +176,138 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   const showBoneStats = !!(selectedBone && clip && !selectedMorph && !multiSel)
 
   const ROT_RANGE = { min: -180, max: 180 }
-  const TRA_RANGE = { min: -5, max: 5 }
+  const TRA_RANGE = { min: -10, max: 10 }
 
-  const setRotationAxis = useCallback(
-    (axisIdx: 0 | 1 | 2, v: number) => {
+  // ─── Slider preview / commit split ──────────────────────────────────
+  //     `*Preview` fires every drag tick: mutates the clip's keyframe in
+  //     place (the engine shares the same track arrays), reloads + seeks so
+  //     the 3D viewport reflects the new pose, and skips `commit()` so we
+  //     don't re-render Timeline / Properties / invalidate caches per frame.
+  //     `*Commit` fires once on pointer-up: commits a new clip reference,
+  //     which cascades through the studio store, landing the change in
+  //     undo/redo and causing EngineBridge to reupload the clip once.
+  //     A ref tracks whether the current drag has actually touched the clip
+  //     so the commit is a no-op when a user just clicks the thumb.
+  const dragDirtyRef = useRef(false)
+
+  const applyRotationAxis = useCallback(
+    (axisIdx: 0 | 1 | 2, v: number, mode: "preview" | "commit") => {
       const model = modelRef.current
       if (!selectedBone || !clip || !model) return
       const cf = playbackFrameRef.current
       const frame = Math.round(Math.max(0, Math.min(clip.frameCount, cf)))
       const atKey = findKeyframeAt(clip, selectedBone, frame)
-      model.loadClip(STUDIO_ANIM_NAME, clip)
-      model.seek(Math.max(0, cf) / 30)
       let q: Quat
       if (atKey) {
-        // Other euler components from stored key, not blended pose (avoids sibling axes drifting)
         const e = quatToEuler(atKey.rotation)
         const next = axisIdx === 0 ? { ...e, x: v } : axisIdx === 1 ? { ...e, y: v } : { ...e, z: v }
         q = eulerToQuat(next.x, next.y, next.z)
-        commit(patchKeyframeAt(clip, selectedBone, frame, (kf) => { kf.rotation = q }))
+        // Mutate in place — engine's clip shares the same keyframe objects.
+        atKey.rotation = q
       } else {
+        // Need pose to create the new keyframe — seek first.
+        model.loadClip(STUDIO_ANIM_NAME, clip)
+        model.seek(Math.max(0, cf) / 30)
         const pose = readLocalPoseAfterSeek(model, selectedBone)
         if (!pose) return
         const e = quatToEuler(pose.rotation)
         const next = axisIdx === 0 ? { ...e, x: v } : axisIdx === 1 ? { ...e, y: v } : { ...e, z: v }
         q = eulerToQuat(next.x, next.y, next.z)
-        commit(upsertBoneKeyframeAtFrame(clip, selectedBone, frame, q, pose.translation))
+        // Insert by mutating the track array in place.
+        const track = clip.boneTracks.get(selectedBone) ?? []
+        if (!clip.boneTracks.has(selectedBone)) clip.boneTracks.set(selectedBone, track)
+        track.push({
+          boneName: selectedBone,
+          frame,
+          rotation: q,
+          translation: pose.translation,
+          interpolation: interpolationTemplateForFrame(track, frame),
+        })
+        track.sort((a, b) => a.frame - b.frame)
+      }
+      // Push to engine for viewport update.
+      model.loadClip(STUDIO_ANIM_NAME, clip)
+      model.seek(Math.max(0, cf) / 30)
+      if (mode === "preview") {
+        dragDirtyRef.current = true
+      } else {
+        // Clone for React notification + undo/redo snapshot.
+        commit({ ...clip, boneTracks: new Map(clip.boneTracks) })
+        dragDirtyRef.current = false
       }
     },
-    [selectedBone, clip, commit, playbackFrameRef],
+    [selectedBone, clip, commit, playbackFrameRef, modelRef],
   )
 
-  const setTranslationAxis = useCallback(
-    (axisIdx: 0 | 1 | 2, v: number) => {
+  const applyTranslationAxis = useCallback(
+    (axisIdx: 0 | 1 | 2, v: number, mode: "preview" | "commit") => {
       const model = modelRef.current
       if (!selectedBone || !clip || !model) return
       const cf = playbackFrameRef.current
       const frame = Math.round(Math.max(0, Math.min(clip.frameCount, cf)))
       const atKey = findKeyframeAt(clip, selectedBone, frame)
-      model.loadClip(STUDIO_ANIM_NAME, clip)
-      model.seek(Math.max(0, cf) / 30)
       if (atKey) {
         const t = atKey.translation
-        const next =
+        atKey.translation =
           axisIdx === 0 ? new Vec3(v, t.y, t.z) : axisIdx === 1 ? new Vec3(t.x, v, t.z) : new Vec3(t.x, t.y, v)
-        commit(patchKeyframeAt(clip, selectedBone, frame, (kf) => { kf.translation = next }))
       } else {
+        model.loadClip(STUDIO_ANIM_NAME, clip)
+        model.seek(Math.max(0, cf) / 30)
         const pose = readLocalPoseAfterSeek(model, selectedBone)
         if (!pose) return
         const t = pose.translation
-        const next =
+        const nextT =
           axisIdx === 0 ? new Vec3(v, t.y, t.z) : axisIdx === 1 ? new Vec3(t.x, v, t.z) : new Vec3(t.x, t.y, v)
-        commit(upsertBoneKeyframeAtFrame(clip, selectedBone, frame, pose.rotation, next))
+        const track = clip.boneTracks.get(selectedBone) ?? []
+        if (!clip.boneTracks.has(selectedBone)) clip.boneTracks.set(selectedBone, track)
+        track.push({
+          boneName: selectedBone,
+          frame,
+          rotation: pose.rotation,
+          translation: nextT,
+          interpolation: interpolationTemplateForFrame(track, frame),
+        })
+        track.sort((a, b) => a.frame - b.frame)
+      }
+      model.loadClip(STUDIO_ANIM_NAME, clip)
+      model.seek(Math.max(0, cf) / 30)
+      if (mode === "preview") {
+        dragDirtyRef.current = true
+      } else {
+        commit({ ...clip, boneTracks: new Map(clip.boneTracks) })
+        dragDirtyRef.current = false
       }
     },
-    [selectedBone, clip, commit, playbackFrameRef],
+    [selectedBone, clip, commit, playbackFrameRef, modelRef],
   )
 
-  const setMorphWeightAtFrame = useCallback(
-    (w: number) => {
+  const applyMorphWeight = useCallback(
+    (w: number, mode: "preview" | "commit") => {
       if (!selectedMorph || !clip) return
       const frame = Math.round(Math.max(0, Math.min(clip.frameCount, playbackFrameRef.current)))
-      commit(upsertMorphKeyframeAtFrame(clip, selectedMorph, frame, w))
+      const track = clip.morphTracks.get(selectedMorph) ?? []
+      if (!clip.morphTracks.has(selectedMorph)) clip.morphTracks.set(selectedMorph, track)
+      const existing = track.find((k) => k.frame === frame)
+      if (existing) {
+        existing.weight = w
+      } else {
+        track.push({ morphName: selectedMorph, frame, weight: w })
+        track.sort((a, b) => a.frame - b.frame)
+      }
+      const model = modelRef.current
+      if (model) {
+        model.loadClip(STUDIO_ANIM_NAME, clip)
+        model.seek(Math.max(0, playbackFrameRef.current) / 30)
+      }
       syncTimelineTabForMorphDrag(timelineTab, setTimelineTab)
+      if (mode === "preview") {
+        dragDirtyRef.current = true
+      } else {
+        commit({ ...clip, morphTracks: new Map(clip.morphTracks) })
+        dragDirtyRef.current = false
+      }
     },
-    [selectedMorph, clip, commit, timelineTab, setTimelineTab, playbackFrameRef],
+    [selectedMorph, clip, commit, timelineTab, setTimelineTab, playbackFrameRef, modelRef],
   )
 
   return (
@@ -278,8 +345,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
                 disabled={!clip}
                 onChange={(v) => {
                   syncTimelineTabForRotationDrag(timelineTab, i as 0 | 1 | 2, setTimelineTab)
-                  setRotationAxis(i as 0 | 1 | 2, v)
+                  applyRotationAxis(i as 0 | 1 | 2, v, "preview")
                 }}
+                onCommit={(v) => applyRotationAxis(i as 0 | 1 | 2, v, "commit")}
               />
             ))
           ) : (
@@ -302,8 +370,9 @@ export const PropertiesInspector = memo(function PropertiesInspector({
                 disabled={!clip}
                 onChange={(v) => {
                   syncTimelineTabForTranslationDrag(timelineTab, i as 0 | 1 | 2, setTimelineTab)
-                  setTranslationAxis(i as 0 | 1 | 2, v)
+                  applyTranslationAxis(i as 0 | 1 | 2, v, "preview")
                 }}
+                onCommit={(v) => applyTranslationAxis(i as 0 | 1 | 2, v, "commit")}
               />
             ))
           ) : (
@@ -336,7 +405,8 @@ export const PropertiesInspector = memo(function PropertiesInspector({
             max={1}
             decimals={2}
             disabled={!clip}
-            onChange={setMorphWeightAtFrame}
+            onChange={(v) => applyMorphWeight(v, "preview")}
+            onCommit={(v) => applyMorphWeight(v, "commit")}
           />
         </section>
       ) : null}
@@ -372,7 +442,7 @@ export const PropertiesInspector = memo(function PropertiesInspector({
 
 /** Subscribes to the playhead so the parent <PropertiesInspector/> doesn't have to. */
 function PlayheadFrameLabel({ frameCount }: { frameCount: number | null }) {
-  const { currentFrame } = usePlayback()
+  const currentFrame = usePlaybackSelector((s) => s.currentFrame)
   return (
     <div className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
       F {Math.round(currentFrame)}
@@ -395,7 +465,7 @@ function InterpolationSection({
   commit: ReturnType<typeof useStudioActions>["commit"]
   clipVersion: number
 }) {
-  const { currentFrame } = usePlayback()
+  const currentFrame = usePlaybackSelector((s) => s.currentFrame)
   const [ipTab, setIpTab] = useState<IpTab>("rot")
 
   // Reset interpolation tab when a new clip is loaded.

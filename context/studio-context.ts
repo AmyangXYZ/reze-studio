@@ -138,13 +138,3 @@ export function useStudioActions(): StudioActions {
   return useStudioStore().actions
 }
 
-type StudioContextValue = StudioState & StudioActions
-
-/** Convenience hook that subscribes to the entire state. Prefer
- *  `useStudioSelector` + `useStudioActions` in new code — this hook re-renders
- *  on every state change. */
-export function useStudio(): StudioContextValue {
-  const store = useStudioStore()
-  const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
-  return { ...state, ...store.actions }
-}

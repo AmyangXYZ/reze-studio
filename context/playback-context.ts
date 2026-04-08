@@ -1,18 +1,19 @@
 "use client"
 
 /** Transport state (playhead + play/pause). Split from <Studio> so playback ticks
- *  don't invalidate the document/selection context every rAF. Not part of undo/redo. */
+ *  don't invalidate the document/selection store. Not part of undo/redo.
+ *
+ *  External store (`useSyncExternalStore`) so consumers can subscribe to slices
+ *  via `usePlaybackSelector` and only re-render on their own field. */
 import {
   createContext,
   createElement,
-  useCallback,
   useContext,
-  useMemo,
-  useReducer,
   useRef,
+  useSyncExternalStore,
   type Dispatch,
-  type MutableRefObject,
   type ReactNode,
+  type RefObject,
   type SetStateAction,
 } from "react"
 
@@ -22,97 +23,101 @@ export type PlaybackState = {
   playing: boolean
 }
 
-type PlaybackAction =
-  | { type: "SET_CURRENT_FRAME"; payload: SetStateAction<number> }
-  | { type: "SET_PLAYING"; payload: SetStateAction<boolean> }
-
-function playbackReducer(state: PlaybackState, action: PlaybackAction): PlaybackState {
-  switch (action.type) {
-    case "SET_CURRENT_FRAME": {
-      const next =
-        typeof action.payload === "function"
-          ? (action.payload as (prev: number) => number)(state.currentFrame)
-          : action.payload
-      if (next === state.currentFrame) return state
-      return { ...state, currentFrame: next }
-    }
-    case "SET_PLAYING": {
-      const next =
-        typeof action.payload === "function"
-          ? (action.payload as (prev: boolean) => boolean)(state.playing)
-          : action.payload
-      if (next === state.playing) return state
-      return { ...state, playing: next }
-    }
-    default:
-      return state
-  }
+export type PlaybackActions = {
+  setCurrentFrame: Dispatch<SetStateAction<number>>
+  setPlaying: Dispatch<SetStateAction<boolean>>
 }
 
-const initialPlaybackState: PlaybackState = {
+const INITIAL_STATE: PlaybackState = {
   currentFrame: 0,
   playing: false,
 }
 
-type PlaybackContextValue = {
-  currentFrame: number
-  setCurrentFrame: Dispatch<SetStateAction<number>>
-  playing: boolean
-  setPlaying: Dispatch<SetStateAction<boolean>>
+function resolve<T>(action: SetStateAction<T>, prev: T): T {
+  return typeof action === "function" ? (action as (p: T) => T)(prev) : action
 }
 
-const PlaybackContext = createContext<PlaybackContextValue | null>(null)
+type PlaybackStore = {
+  getState: () => PlaybackState
+  subscribe: (listener: () => void) => () => void
+  actions: PlaybackActions
+  currentFrameRef: RefObject<number>
+}
 
-/** Separate context whose value is a stable ref to the latest currentFrame.
- *  Consumers that only need to *read* the playhead at call time (e.g. inside
- *  callbacks) subscribe to this instead of `PlaybackContext`, so they don't
- *  re-render every rAF tick during playback. */
-type PlaybackRefContextValue = { currentFrameRef: MutableRefObject<number> }
-const PlaybackRefContext = createContext<PlaybackRefContextValue | null>(null)
+function createPlaybackStore(): PlaybackStore {
+  let state = INITIAL_STATE
+  const listeners = new Set<() => void>()
+  const currentFrameRef: RefObject<number> = { current: 0 }
+
+  const set = (next: PlaybackState) => {
+    if (next === state) return
+    state = next
+    currentFrameRef.current = next.currentFrame
+    listeners.forEach((l) => l())
+  }
+
+  const update = <K extends keyof PlaybackState>(key: K, action: SetStateAction<PlaybackState[K]>) => {
+    const next = resolve(action, state[key])
+    if (next === state[key]) return
+    set({ ...state, [key]: next })
+  }
+
+  const actions: PlaybackActions = {
+    setCurrentFrame: (payload) => update("currentFrame", payload),
+    setPlaying: (payload) => update("playing", payload),
+  }
+
+  return {
+    getState: () => state,
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+    actions,
+    currentFrameRef,
+  }
+}
+
+const PlaybackStoreContext = createContext<PlaybackStore | null>(null)
 
 export function Playback({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(playbackReducer, initialPlaybackState)
-  const currentFrameRef = useRef(state.currentFrame)
-  currentFrameRef.current = state.currentFrame
-  const refValue = useMemo<PlaybackRefContextValue>(() => ({ currentFrameRef }), [])
-
-  const setCurrentFrame = useCallback((payload: SetStateAction<number>) => {
-    dispatch({ type: "SET_CURRENT_FRAME", payload })
-  }, [])
-
-  const setPlaying = useCallback((payload: SetStateAction<boolean>) => {
-    dispatch({ type: "SET_PLAYING", payload })
-  }, [])
-
-  const value = useMemo(
-    (): PlaybackContextValue => ({
-      currentFrame: state.currentFrame,
-      setCurrentFrame,
-      playing: state.playing,
-      setPlaying,
-    }),
-    [state.currentFrame, state.playing, setCurrentFrame, setPlaying],
-  )
-
-  return createElement(
-    PlaybackRefContext.Provider,
-    { value: refValue },
-    createElement(PlaybackContext.Provider, { value }, children),
-  )
+  const storeRef = useRef<PlaybackStore | null>(null)
+  if (storeRef.current == null) storeRef.current = createPlaybackStore()
+  return createElement(PlaybackStoreContext.Provider, { value: storeRef.current }, children)
 }
 
-export function usePlayback(): PlaybackContextValue {
-  const ctx = useContext(PlaybackContext)
-  if (ctx == null) throw new Error("usePlayback must be used within <Playback>")
-  return ctx
+function usePlaybackStore(): PlaybackStore {
+  const store = useContext(PlaybackStoreContext)
+  if (store == null) throw new Error("usePlayback* must be used within <Playback>")
+  return store
+}
+
+/** Subscribe to a slice of playback state. */
+export function usePlaybackSelector<T>(selector: (state: PlaybackState) => T): T {
+  const store = usePlaybackStore()
+  const getSnapshot = () => selector(store.getState())
+  return useSyncExternalStore(store.subscribe, getSnapshot, getSnapshot)
+}
+
+/** Stable actions bag — never causes a re-render. */
+export function usePlaybackActions(): PlaybackActions {
+  return usePlaybackStore().actions
+}
+
+/** Convenience: subscribe to everything. Prefer `usePlaybackSelector` when you
+ *  only need one field. */
+export function usePlayback(): PlaybackState & PlaybackActions {
+  const currentFrame = usePlaybackSelector((s) => s.currentFrame)
+  const playing = usePlaybackSelector((s) => s.playing)
+  const actions = usePlaybackActions()
+  return { currentFrame, playing, ...actions }
 }
 
 /** Read-only, non-subscribing access to the latest playhead. The returned ref
  *  identity is stable for the lifetime of <Playback>, so consuming this hook
- *  will NOT cause a re-render when the playhead moves. Use `.current` inside
- *  callbacks / effects, never in render. */
-export function usePlaybackFrameRef(): MutableRefObject<number> {
-  const ctx = useContext(PlaybackRefContext)
-  if (ctx == null) throw new Error("usePlaybackFrameRef must be used within <Playback>")
-  return ctx.currentFrameRef
+ *  will NOT cause a re-render when the playhead moves. */
+export function usePlaybackFrameRef(): RefObject<number> {
+  return usePlaybackStore().currentFrameRef
 }
