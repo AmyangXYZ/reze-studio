@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useCallback,
   useMemo,
+  type MutableRefObject,
 } from "react"
 import {
   ChevronLeft,
@@ -377,6 +378,10 @@ interface TimelineCanvasProps {
   ) => void
   onMoveCurveKeyframe: (bone: string, kfRef: BoneKeyframe, channel: string, toFrame: number, dv: number) => void
   onMoveMorphKeyframe: (morph: string, kfRef: MorphKeyframe, toFrame: number, dw: number) => void
+  /** Imperative draw handle: playback rAF loop writes the latest frame directly
+   *  via `ref.current(frame)`, bypassing React reconciliation for 60Hz playhead
+   *  updates. Populated by TimelineCanvas on mount. */
+  playheadDrawRef?: MutableRefObject<((frame: number) => void) | null>
 }
 
 function TimelineCanvas({
@@ -395,8 +400,13 @@ function TimelineCanvas({
   onMoveDopeKeyframe,
   onMoveCurveKeyframe,
   onMoveMorphKeyframe,
+  playheadDrawRef,
 }: TimelineCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  /** Latest frame for the draw closure to read — keeps `currentFrame` out of
+   *  the `draw` useCallback deps so playback ticks don't re-run layout effects. */
+  const frameRef = useRef(currentFrame)
+  frameRef.current = currentFrame
   const sizeRef = useRef({ w: 0, h: 0, dpr: 0 })
   /** Offscreen cache: ruler + grid + curves + dopesheet. Repainted only when
    *  non-currentFrame deps change, so playback ticks just blit + draw the playhead. */
@@ -843,7 +853,9 @@ function TimelineCanvas({
     mainCtx.drawImage(off, 0, 0)
     mainCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-    // ── Per-tick overlay: value readout (depends on currentFrame) ──
+    // ── Per-tick overlay: value readout (reads frameRef so playback rAF can
+    //    call `draw()` without invalidating the useCallback closure) ──
+    const frame = frameRef.current
     {
       const ctx = mainCtx
       if (tab === "morph" && selectedMorph) {
@@ -854,7 +866,7 @@ function TimelineCanvas({
           ctx.textAlign = "right"
           let val = 0
           for (const k of morphKfs) {
-            if (k.frame <= currentFrame) val = k.weight
+            if (k.frame <= frame) val = k.weight
           }
           ctx.fillStyle = MORPH_COLOR
           ctx.fillText(`Weight: ${val.toFixed(2)}`, w - 8, curveTop + 5)
@@ -874,7 +886,7 @@ function TimelineCanvas({
           channels.forEach((ch, i) => {
             let val = 0
             for (const k of keyframes) {
-              if (k.frame <= currentFrame) val = ch.get(k)
+              if (k.frame <= frame) val = ch.get(k)
             }
             ctx.fillStyle = ch.color
             ctx.fillText(`${ch.label}: ${formatVal(val)}`, w - 8, curveTop + 5 + i * 13)
@@ -883,7 +895,7 @@ function TimelineCanvas({
       }
 
       // ── Playhead ──
-      const px = toX(currentFrame)
+      const px = toX(frame)
       if (px >= LABEL_W && px <= w) {
         const g = ctx.createLinearGradient(px - 14, 0, px + 14, 0)
         g.addColorStop(0, "transparent")
@@ -906,12 +918,28 @@ function TimelineCanvas({
         ctx.fill()
       }
     }
-  }, [clip, pxPerFrame, yZoom, scrollX, currentFrame, selectedBone, selectedMorph, visibleBones, selectedKeyframes, tab, getDopeFrames])
+  }, [clip, pxPerFrame, yZoom, scrollX, selectedBone, selectedMorph, visibleBones, selectedKeyframes, tab, getDopeFrames])
 
   // Layout-phase paint: `useEffect`+nested rAF ran after browser paint → playhead lagged 1–2 frames behind transport.
+  // `currentFrame` is in deps (not in `draw`'s deps) so scrubbing + throttled
+  // playback state updates still repaint; 60Hz playback bypasses this via
+  // `playheadDrawRef` below.
   useLayoutEffect(() => {
     draw()
-  }, [draw])
+  }, [draw, currentFrame])
+
+  // Publish the imperative draw handle so the playback rAF loop can update the
+  // playhead without going through React state.
+  useEffect(() => {
+    if (!playheadDrawRef) return
+    playheadDrawRef.current = (frame: number) => {
+      frameRef.current = frame
+      draw()
+    }
+    return () => {
+      if (playheadDrawRef.current) playheadDrawRef.current = null
+    }
+  }, [draw, playheadDrawRef])
 
   useEffect(() => {
     const el = canvasRef.current
@@ -1153,6 +1181,8 @@ interface TimelineProps {
   /** Lifted channel tab state — synced from keyframe selection and slider interactions. */
   tab: string
   setTab: (tab: string) => void
+  /** Imperative playhead draw handle — see TimelineCanvasProps. */
+  playheadDrawRef?: MutableRefObject<((frame: number) => void) | null>
 }
 
 export function Timeline({
@@ -1160,6 +1190,7 @@ export function Timeline({
   clipVersion,
   tab,
   setTab,
+  playheadDrawRef,
 }: TimelineProps) {
   const {
     clip,
@@ -1220,6 +1251,9 @@ export function Timeline({
   }, [trackWidth, fc])
 
   // ── Auto-scroll: page-turn when playhead leaves the visible window ──
+  // During playback the rAF loop drives the playhead imperatively and does NOT
+  // update `currentFrame` state — so page-turn is handled in the wrapped
+  // `playheadDrawRef` below. This effect only covers scrub / paused navigation.
   useEffect(() => {
     if (trackWidth <= 0) return
     const viewable = trackWidth - LABEL_W
@@ -1235,6 +1269,37 @@ export function Timeline({
     const target = Math.max(0, Math.min(maxScroll, playheadX - viewable * 0.1))
     setScrollX(target)
   }, [currentFrame, trackWidth, fc])
+
+  // Wrap the parent's imperative draw handle so each 60Hz tick can page-turn
+  // the timeline if the playhead leaves the visible window. `setScrollX` fires
+  // only on the page-turn frame (a few times per clip), not per-frame.
+  const innerDrawRef = useRef<((frame: number) => void) | null>(null)
+  const fcRef = useRef(fc)
+  fcRef.current = fc
+  const trackWidthRef = useRef(trackWidth)
+  trackWidthRef.current = trackWidth
+  useEffect(() => {
+    if (!playheadDrawRef) return
+    playheadDrawRef.current = (frame: number) => {
+      const tw = trackWidthRef.current
+      const viewable = tw - LABEL_W
+      if (viewable > 0) {
+        const px = pxRef.current
+        const playheadX = frame * px
+        const visLeft = scrollXRef.current
+        const visRight = visLeft + viewable
+        if (playheadX < visLeft || playheadX > visRight) {
+          const maxScroll = Math.max(0, LABEL_W + fcRef.current * px - tw)
+          const target = Math.max(0, Math.min(maxScroll, playheadX - viewable * 0.1))
+          setScrollX(target)
+        }
+      }
+      innerDrawRef.current?.(frame)
+    }
+    return () => {
+      if (playheadDrawRef.current) playheadDrawRef.current = null
+    }
+  }, [playheadDrawRef])
 
   // Zoom anchored on the playhead: adjust scrollX so the playhead stays at the
   // same screen-relative position before and after the pxPerFrame change.
@@ -1255,18 +1320,31 @@ export function Timeline({
     [minPxPerFrame, trackWidth, currentFrame, fc],
   )
 
-  const onWheel = useCallback(
-    (e: React.WheelEvent) => {
+  // Native non-passive wheel listener — React's synthetic onWheel is passive,
+  // so `preventDefault()` there is ignored and the page scrolls instead of the
+  // timeline handling the gesture. Attach directly to the DOM node.
+  //  - ctrl/⌘ + wheel → time zoom
+  //  - shift + wheel  → value zoom
+  //  - plain wheel    → horizontal scroll
+  useEffect(() => {
+    const el = timelineAreaRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      if (e.ctrlKey || e.metaKey) zoomTo(pxRef.current - e.deltaY * 0.02)
-      else if (e.shiftKey) {
-        const factor = Math.exp(-e.deltaY * 0.002)
+      if (e.ctrlKey || e.metaKey) {
+        zoomTo(pxRef.current - e.deltaY * 0.02)
+      } else if (e.shiftKey) {
+        // macOS remaps shift+wheel vertical delta onto deltaX — take whichever is non-zero.
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX
+        const factor = Math.exp(-delta * 0.002)
         setYZoom((z) => Math.max(Y_ZOOM_MIN, Math.min(Y_ZOOM_MAX, z * factor)))
+      } else {
+        setScrollX((p) => Math.max(0, p + e.deltaX + e.deltaY))
       }
-      else setScrollX((p) => Math.max(0, p + e.deltaX + e.deltaY))
-    },
-    [zoomTo],
-  )
+    }
+    el.addEventListener("wheel", onWheel, { passive: false })
+    return () => el.removeEventListener("wheel", onWheel)
+  }, [zoomTo])
 
   const onSelectKeyframe = useCallback(
     (kf: SelectedKeyframe, multi: boolean) => {
@@ -1559,7 +1637,7 @@ export function Timeline({
         <ZoomRuler min={Y_ZOOM_MIN} max={Y_ZOOM_MAX} value={yZoom} onChange={setYZoom} />
       </div>
       {/* Canvas */}
-      <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0 }} onWheel={onWheel}>
+      <div ref={timelineAreaRef} style={{ flex: 1, minHeight: 0 }}>
         {clip ? (
           <TimelineCanvas
             clip={clip}
@@ -1580,6 +1658,7 @@ export function Timeline({
             onMoveDopeKeyframe={onMoveDopeKeyframe}
             onMoveCurveKeyframe={onMoveCurveKeyframe}
             onMoveMorphKeyframe={onMoveMorphKeyframe}
+            playheadDrawRef={innerDrawRef}
           />
         ) : (
           <div

@@ -33,7 +33,7 @@ import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline } from "@/components/timeline"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
-import { Studio, useStudio } from "@/context/studio-context"
+import { Studio, useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { Playback, usePlayback } from "@/context/playback-context"
 import {
   DEFAULT_STUDIO_CLIP_FRAMES,
@@ -193,7 +193,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   repoUrl,
   appVersion,
 }: StudioLeftPanelProps) {
-  const { clip } = useStudio()
+  const clip = useStudioSelector((s) => s.clip)
   const hasClip = clip != null
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r border-border">
@@ -438,18 +438,14 @@ function StudioPage() {
   const [engineError, setEngineError] = useState<string | null>(null)
 
   // ─── Document + selection live in `<Studio>`; page wires engine + chrome only ──
-  const {
-    clip,
-    commit,
-    clipDisplayName,
-    setClipDisplayName,
-    selectedBone,
-    setSelectedBone,
-    selectedMorph,
-    setSelectedMorph,
-    selectedKeyframes,
-    setSelectedKeyframes,
-  } = useStudio()
+  // Slice subscriptions so unrelated state changes don't re-render this page.
+  const clip = useStudioSelector((s) => s.clip)
+  const clipDisplayName = useStudioSelector((s) => s.clipDisplayName)
+  const selectedBone = useStudioSelector((s) => s.selectedBone)
+  const selectedMorph = useStudioSelector((s) => s.selectedMorph)
+  const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
+  const { commit, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes } =
+    useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   /** Model finished loading (file menu + export need a live Model instance). */
   const [studioReady, setStudioReady] = useState(false)
@@ -501,6 +497,9 @@ function StudioPage() {
   const lastReportedEngineFpsRef = useRef<number | null>(null)
 
   const playRef = useRef(false)
+  /** Imperative handle into the timeline canvas — the playback rAF loop uses
+   *  this to repaint the playhead at 60Hz without re-rendering React. */
+  const playheadDrawRef = useRef<((frame: number) => void) | null>(null)
   /** Snapshotted before async PMX swap so clip/playhead survive `await loadModel`. */
   const clipRef = useRef<AnimationClip | null>(null)
   const currentFrameRef = useRef(0)
@@ -573,11 +572,20 @@ function StudioPage() {
         setPlaying(false)
         return
       }
-      setCurrentFrame(frame)
+      // Pure imperative path — no React state updates during playback.
+      // `currentFrameRef` + `playheadDrawRef(frame)` drive the visual playhead
+      // at monitor refresh rate with zero reconciliation cost.
+      currentFrameRef.current = frame
+      playheadDrawRef.current?.(frame)
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      cancelAnimationFrame(raf)
+      // Flush the last drawn frame into React state so the paused view matches
+      // what the playhead was last showing (throttled sync may lag by up to 100ms).
+      setCurrentFrame(currentFrameRef.current)
+    }
   }, [playing, frameCount, setCurrentFrame, setPlaying])
 
   // ─── Keyboard shortcuts ──────────────────────────────────────────────
@@ -1198,7 +1206,7 @@ function StudioPage() {
           <StudioViewport ref={canvasRef} engineError={engineError} />
           {/* Timeline with dopesheet + value graph */}
           <div className="h-[220px] shrink-0 border-t border-border">
-            <Timeline visibleBones={visibleBones} clipVersion={clipVersion} tab={timelineTab} setTab={setTimelineTab} />
+            <Timeline visibleBones={visibleBones} clipVersion={clipVersion} tab={timelineTab} setTab={setTimelineTab} playheadDrawRef={playheadDrawRef} />
           </div>
         </div>
 
