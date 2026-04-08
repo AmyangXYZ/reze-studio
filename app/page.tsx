@@ -34,6 +34,7 @@ import { Timeline } from "@/components/timeline"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
 import { Studio, useStudio } from "@/context/studio-context"
+import { Playback, usePlayback } from "@/context/playback-context"
 import {
   DEFAULT_STUDIO_CLIP_FRAMES,
   interpolationTemplateForFrame,
@@ -64,20 +65,24 @@ function clipRetainedForModel(
   const boneTracks = new Map<string, BoneKeyframe[]>()
   for (const [name, track] of clip.boneTracks) {
     if (!boneNames.has(name) || !track?.length) continue
-    boneTracks.set(name, track.map((kf) => ({ ...kf })))
+    boneTracks.set(
+      name,
+      track.map((kf) => ({ ...kf })),
+    )
   }
   const morphTracks = new Map<string, MorphKeyframe[]>()
   for (const [name, track] of clip.morphTracks) {
     if (!morphNames.has(name) || !track?.length) continue
-    morphTracks.set(name, track.map((kf) => ({ ...kf })))
+    morphTracks.set(
+      name,
+      track.map((kf) => ({ ...kf })),
+    )
   }
   let inferred = 0
   for (const t of boneTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
   for (const t of morphTracks.values()) for (const k of t) inferred = Math.max(inferred, k.frame)
   const empty = boneTracks.size === 0 && morphTracks.size === 0
-  const end = empty
-    ? Math.max(clip.frameCount, DEFAULT_STUDIO_CLIP_FRAMES)
-    : Math.max(clip.frameCount, inferred)
+  const end = empty ? Math.max(clip.frameCount, DEFAULT_STUDIO_CLIP_FRAMES) : Math.max(clip.frameCount, inferred)
   return { boneTracks, morphTracks, frameCount: end }
 }
 
@@ -105,11 +110,7 @@ function sanitizeClipFilenameBase(name: string): string {
 }
 
 /** Reuse `livePose` object when floats haven’t moved — keeps memo’d Properties from reconciling every RAF. */
-function poseNearEqual(
-  a: { euler: { x: number; y: number; z: number }; translation: Vec3 },
-  b: typeof a,
-  eps = 1e-5,
-) {
+function poseNearEqual(a: { euler: { x: number; y: number; z: number }; translation: Vec3 }, b: typeof a, eps = 1e-5) {
   return (
     Math.abs(a.euler.x - b.euler.x) < eps &&
     Math.abs(a.euler.y - b.euler.y) < eps &&
@@ -122,10 +123,7 @@ function poseNearEqual(
 
 /** Canvas + error overlay — playhead updates won’t reconcile this subtree. */
 const StudioViewport = memo(
-  forwardRef<HTMLCanvasElement, { engineError: string | null }>(function StudioViewport(
-    { engineError },
-    ref,
-  ) {
+  forwardRef<HTMLCanvasElement, { engineError: string | null }>(function StudioViewport({ engineError }, ref) {
     return (
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <canvas ref={ref} className="block h-full w-full touch-none" />
@@ -370,7 +368,12 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
             Morphs
           </div>
           <div className="min-h-0 flex-1 overflow-hidden">
-            <MorphList morphNames={morphNames} clip={clip} selectedMorph={selectedMorph} onSelectMorph={onSelectMorph} />
+            <MorphList
+              morphNames={morphNames}
+              clip={clip}
+              selectedMorph={selectedMorph}
+              onSelectMorph={onSelectMorph}
+            />
           </div>
         </div>
       </div>
@@ -418,9 +421,7 @@ const StudioStatusFooter = memo(function StudioStatusFooter({
       </div>
       <div className="min-w-0 flex-1 truncate px-2 text-left text-[10px] text-muted-foreground/90">{statusMessage}</div>
       <div className="flex shrink-0 items-center gap-x-2 tabular-nums">
-        <span title="Main-thread / compositor frame rate">
-          {statusFps != null ? `${statusFps} FPS` : "— FPS"}
-        </span>
+        <span title="Main-thread / compositor frame rate">{statusFps != null ? `${statusFps} FPS` : "— FPS"}</span>
         <span className="text-border" aria-hidden>
           ·
         </span>
@@ -448,11 +449,8 @@ function StudioPage() {
     setSelectedMorph,
     selectedKeyframes,
     setSelectedKeyframes,
-    currentFrame,
-    setCurrentFrame,
-    playing,
-    setPlaying,
   } = useStudio()
+  const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   /** Model finished loading (file menu + export need a live Model instance). */
   const [studioReady, setStudioReady] = useState(false)
 
@@ -615,24 +613,33 @@ function StudioPage() {
   }, [frameCount, setCurrentFrame, setPlaying])
 
   // ─── Bone selection handlers ─────────────────────────────────────────
-  const handleSelectGroup = useCallback((g: string) => {
-    setSelectedGroup((prev) => (prev === g ? "" : g))
-    setSelectedBone(null)
-    setSelectedMorph(null)
-    setSelectedKeyframes([])
-  }, [setSelectedBone, setSelectedMorph, setSelectedKeyframes])
+  const handleSelectGroup = useCallback(
+    (g: string) => {
+      setSelectedGroup((prev) => (prev === g ? "" : g))
+      setSelectedBone(null)
+      setSelectedMorph(null)
+      setSelectedKeyframes([])
+    },
+    [setSelectedBone, setSelectedMorph, setSelectedKeyframes],
+  )
 
-  const handleSelectBone = useCallback((b: string) => {
-    setSelectedMorph(null)
-    setSelectedBone(b)
-    setSelectedKeyframes([])
-  }, [setSelectedBone, setSelectedMorph, setSelectedKeyframes])
+  const handleSelectBone = useCallback(
+    (b: string) => {
+      setSelectedMorph(null)
+      setSelectedBone(b)
+      setSelectedKeyframes([])
+    },
+    [setSelectedBone, setSelectedMorph, setSelectedKeyframes],
+  )
 
-  const handleSelectMorph = useCallback((name: string) => {
-    setSelectedBone(null)
-    setSelectedMorph(name)
-    setSelectedKeyframes([])
-  }, [setSelectedBone, setSelectedMorph, setSelectedKeyframes])
+  const handleSelectMorph = useCallback(
+    (name: string) => {
+      setSelectedBone(null)
+      setSelectedMorph(name)
+      setSelectedKeyframes([])
+    },
+    [setSelectedBone, setSelectedMorph, setSelectedKeyframes],
+  )
 
   useEffect(() => {
     if (selectedBone && !pmxBoneNames.has(selectedBone)) setSelectedBone(null)
@@ -643,9 +650,7 @@ function StudioPage() {
   }, [selectedMorph, morphNames, setSelectedMorph])
 
   useEffect(() => {
-    setSelectedKeyframes((prev) =>
-      prev.filter((s) => s.type !== "curve" || !s.bone || pmxBoneNames.has(s.bone)),
-    )
+    setSelectedKeyframes((prev) => prev.filter((s) => s.type !== "curve" || !s.bone || pmxBoneNames.has(s.bone)))
   }, [pmxBoneNames, setSelectedKeyframes])
 
   // ─── Engine init ─────────────────────────────────────────────────────
@@ -765,8 +770,7 @@ function StudioPage() {
       if (model.name === "reze") {
         model.setMorphWeight("抗穿模", 0.5)
       }
-    }
-    else model.pause()
+    } else model.pause()
   }, [playing, clip])
 
   useEffect(() => {
@@ -929,15 +933,18 @@ function StudioPage() {
     setSelectedKeyframes([{ type: "curve", bone: selectedBone, frame, channel: "rx" }])
   }, [clip, selectedBone, selectedMorph, currentFrame, morphWeightReadout, commit, setSelectedKeyframes])
 
-  const syncStudioAfterNewClip = useCallback((model: Model) => {
-    setCurrentFrame(0)
-    setPlaying(false)
-    setSelectedKeyframes([])
-    setClipVersion((v) => v + 1)
-    model.show(STUDIO_ANIM_NAME)
-    model.seek(0)
-    if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
-  }, [setSelectedKeyframes, setCurrentFrame, setPlaying])
+  const syncStudioAfterNewClip = useCallback(
+    (model: Model) => {
+      setCurrentFrame(0)
+      setPlaying(false)
+      setSelectedKeyframes([])
+      setClipVersion((v) => v + 1)
+      model.show(STUDIO_ANIM_NAME)
+      model.seek(0)
+      if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
+    },
+    [setSelectedKeyframes, setCurrentFrame, setPlaying],
+  )
 
   const applyLoadedPmxModel = useCallback(
     (
@@ -964,14 +971,11 @@ function StudioPage() {
       setStatusPmxFileName(pmxFileName.trim() || `${displayStem}.pmx`)
       setSelectedBone((prev) => (prev && boneSet.has(prev) ? prev : null))
       setSelectedMorph((prev) => (prev && morphSet.has(prev) ? prev : null))
-      setSelectedKeyframes((prev) =>
-        prev.filter((s) => s.type !== "curve" || !s.bone || boneSet.has(s.bone)),
-      )
+      setSelectedKeyframes((prev) => prev.filter((s) => s.type !== "curve" || !s.bone || boneSet.has(s.bone)))
 
       const prev = animationSnapshot.clip
       const hasPrevTimeline =
-        prev != null &&
-        (prev.boneTracks.size > 0 || prev.morphTracks.size > 0 || prev.frameCount > 0)
+        prev != null && (prev.boneTracks.size > 0 || prev.morphTracks.size > 0 || prev.frameCount > 0)
 
       let nextClip: AnimationClip
       let nextDisplay: string
@@ -981,10 +985,7 @@ function StudioPage() {
       if (hasPrevTimeline) {
         nextClip = clipRetainedForModel(prev, boneSet, morphSet)
         nextDisplay = animationSnapshot.clipDisplayName
-        nextFrame = Math.min(
-          Math.max(0, animationSnapshot.currentFrame),
-          Math.max(0, nextClip.frameCount),
-        )
+        nextFrame = Math.min(Math.max(0, animationSnapshot.currentFrame), Math.max(0, nextClip.frameCount))
         nextPlaying = animationSnapshot.playing
       } else {
         nextClip = emptyStudioClip()
@@ -1007,15 +1008,7 @@ function StudioPage() {
       else model.pause()
       setEngineError(null)
     },
-    [
-      commit,
-      setSelectedBone,
-      setSelectedMorph,
-      setSelectedKeyframes,
-      setClipDisplayName,
-      setCurrentFrame,
-      setPlaying,
-    ],
+    [commit, setSelectedBone, setSelectedMorph, setSelectedKeyframes, setClipDisplayName, setCurrentFrame, setPlaying],
   )
 
   const loadPmxFromFolder = useCallback(
@@ -1034,7 +1027,7 @@ function StudioPage() {
       }
       try {
         const model = await engine.loadModel(instanceKey, { files, pmxFile })
-        await new Promise(resolve => requestAnimationFrame(resolve))
+        await new Promise((resolve) => requestAnimationFrame(resolve))
         model.setName(sanitizeClipFilenameBase(stem))
         applyLoadedPmxModel(model, instanceKey, stem, pmxFile.name, {
           clip: clipRef.current,
@@ -1158,15 +1151,7 @@ function StudioPage() {
     setClipVersion((v) => v + 1)
     model.show(STUDIO_ANIM_NAME)
     model.seek(0)
-  }, [
-    commit,
-    setClipDisplayName,
-    setSelectedBone,
-    setSelectedMorph,
-    setSelectedKeyframes,
-    setCurrentFrame,
-    setPlaying,
-  ])
+  }, [commit, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes, setCurrentFrame, setPlaying])
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
@@ -1204,12 +1189,7 @@ function StudioPage() {
           <StudioViewport ref={canvasRef} engineError={engineError} />
           {/* Timeline with dopesheet + value graph */}
           <div className="h-[220px] shrink-0 border-t border-border">
-            <Timeline
-              visibleBones={visibleBones}
-              clipVersion={clipVersion}
-              tab={timelineTab}
-              setTab={setTimelineTab}
-            />
+            <Timeline visibleBones={visibleBones} clipVersion={clipVersion} tab={timelineTab} setTab={setTimelineTab} />
           </div>
         </div>
 
@@ -1250,7 +1230,9 @@ function StudioPage() {
 export default function Home() {
   return (
     <Studio>
-      <StudioPage />
+      <Playback>
+        <StudioPage />
+      </Playback>
     </Studio>
   )
 }

@@ -23,6 +23,7 @@ import {
   VMD_LINEAR_DEFAULT_IP,
 } from "@/lib/utils"
 import { useStudio } from "@/context/studio-context"
+import { usePlayback } from "@/context/playback-context"
 
 /** Must match `loadClip` name in app/page (engine clip vs React state). */
 const STUDIO_ANIM_NAME = "studio"
@@ -157,7 +158,8 @@ export const PropertiesInspector = memo(function PropertiesInspector({
   setTimelineTab,
   clipVersion,
 }: PropertiesInspectorProps) {
-  const { clip, commit, selectedBone, selectedMorph, selectedKeyframes, currentFrame } = useStudio()
+  const { clip, commit, selectedBone, selectedMorph, selectedKeyframes } = useStudio()
+  const { currentFrame } = usePlayback()
   const fPlay = Math.round(currentFrame)
   const singleSel = selectedKeyframes.length === 1 ? selectedKeyframes[0] : null
   const multiSel = selectedKeyframes.length > 1

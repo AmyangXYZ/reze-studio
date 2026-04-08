@@ -1,6 +1,8 @@
 "use client"
 
-/** Global studio: document, selection, transport (playhead + play/pause) — one reducer. */
+/** Editable document + selection. Wraps the reducer that becomes the undo/redo target.
+ *  Transport (playhead + play/pause) lives in <Playback> so playback ticks don't
+ *  invalidate this context every rAF. */
 import {
   createContext,
   createElement,
@@ -32,9 +34,6 @@ export type StudioState = {
   selectedBone: string | null
   selectedMorph: string | null
   selectedKeyframes: SelectedKeyframe[]
-  /** Transport playhead in clip frames (fractional allowed while scrubbing / playing). */
-  currentFrame: number
-  playing: boolean
 }
 
 type StudioReducerAction =
@@ -43,8 +42,6 @@ type StudioReducerAction =
   | { type: "SET_SELECTED_BONE"; payload: SetStateAction<string | null> }
   | { type: "SET_SELECTED_MORPH"; payload: SetStateAction<string | null> }
   | { type: "SET_SELECTED_KEYFRAMES"; payload: SetStateAction<SelectedKeyframe[]> }
-  | { type: "SET_CURRENT_FRAME"; payload: SetStateAction<number> }
-  | { type: "SET_PLAYING"; payload: SetStateAction<boolean> }
 
 function studioReducer(state: StudioState, action: StudioReducerAction): StudioState {
   switch (action.type) {
@@ -60,8 +57,6 @@ function studioReducer(state: StudioState, action: StudioReducerAction): StudioS
           selectedBone: null,
           selectedMorph: null,
           selectedKeyframes: [],
-          currentFrame: 0,
-          playing: false,
         }
       }
       return { ...state, clip: clipAfterKeyframeEdit(next) }
@@ -89,20 +84,6 @@ function studioReducer(state: StudioState, action: StudioReducerAction): StudioS
           : action.payload
       return { ...state, selectedKeyframes: next }
     }
-    case "SET_CURRENT_FRAME": {
-      const next =
-        typeof action.payload === "function"
-          ? (action.payload as (prev: number) => number)(state.currentFrame)
-          : action.payload
-      return { ...state, currentFrame: next }
-    }
-    case "SET_PLAYING": {
-      const next =
-        typeof action.payload === "function"
-          ? (action.payload as (prev: boolean) => boolean)(state.playing)
-          : action.payload
-      return { ...state, playing: next }
-    }
     default:
       return state
   }
@@ -114,8 +95,6 @@ const initialStudioState: StudioState = {
   selectedBone: null,
   selectedMorph: null,
   selectedKeyframes: [],
-  currentFrame: 0,
-  playing: false,
 }
 
 export type StudioKeyframesSetter = Dispatch<SetStateAction<SelectedKeyframe[]>>
@@ -131,10 +110,6 @@ type StudioContextValue = {
   setSelectedMorph: Dispatch<SetStateAction<string | null>>
   selectedKeyframes: SelectedKeyframe[]
   setSelectedKeyframes: StudioKeyframesSetter
-  currentFrame: number
-  setCurrentFrame: Dispatch<SetStateAction<number>>
-  playing: boolean
-  setPlaying: Dispatch<SetStateAction<boolean>>
 }
 
 const StudioContext = createContext<StudioContextValue | null>(null)
@@ -162,14 +137,6 @@ export function Studio({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_SELECTED_KEYFRAMES", payload })
   }, [])
 
-  const setCurrentFrame = useCallback((payload: SetStateAction<number>) => {
-    dispatch({ type: "SET_CURRENT_FRAME", payload })
-  }, [])
-
-  const setPlaying = useCallback((payload: SetStateAction<boolean>) => {
-    dispatch({ type: "SET_PLAYING", payload })
-  }, [])
-
   const value = useMemo(
     (): StudioContextValue => ({
       clip: state.clip,
@@ -182,10 +149,6 @@ export function Studio({ children }: { children: ReactNode }) {
       setSelectedMorph,
       selectedKeyframes: state.selectedKeyframes,
       setSelectedKeyframes,
-      currentFrame: state.currentFrame,
-      setCurrentFrame,
-      playing: state.playing,
-      setPlaying,
     }),
     [
       state.clip,
@@ -193,15 +156,11 @@ export function Studio({ children }: { children: ReactNode }) {
       state.selectedBone,
       state.selectedMorph,
       state.selectedKeyframes,
-      state.currentFrame,
-      state.playing,
       commit,
       setClipDisplayName,
       setSelectedBone,
       setSelectedMorph,
       setSelectedKeyframes,
-      setCurrentFrame,
-      setPlaying,
     ],
   )
 

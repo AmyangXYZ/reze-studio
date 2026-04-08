@@ -21,6 +21,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useStudio, type SelectedKeyframe } from "@/context/studio-context"
+import { usePlayback } from "@/context/playback-context"
 import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
 import {
   type Channel,
@@ -397,6 +398,34 @@ function TimelineCanvas({
 }: TimelineCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sizeRef = useRef({ w: 0, h: 0, dpr: 0 })
+  /** Offscreen cache: ruler + grid + curves + dopesheet. Repainted only when
+   *  non-currentFrame deps change, so playback ticks just blit + draw the playhead. */
+  const staticCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const staticCacheRef = useRef<{
+    w: number
+    h: number
+    clip: AnimationClip | null
+    pxPerFrame: number
+    yZoom: number
+    scrollX: number
+    selectedBone: string | null
+    selectedMorph: string | null
+    visibleBones: readonly string[] | null
+    selectedKeyframes: readonly SelectedKeyframe[] | null
+    tab: string
+  }>({
+    w: 0,
+    h: 0,
+    clip: null,
+    pxPerFrame: 0,
+    yZoom: 0,
+    scrollX: 0,
+    selectedBone: null,
+    selectedMorph: null,
+    visibleBones: null,
+    selectedKeyframes: null,
+    tab: "",
+  })
   const drag = useRef<{
     type: string
     bone?: string
@@ -430,21 +459,42 @@ function TimelineCanvas({
   const draw = useCallback(() => {
     const el = canvasRef.current
     if (!el) return
-    const ctx = el.getContext("2d")
-    if (!ctx) return
+    const mainCtx = el.getContext("2d")
+    if (!mainCtx) return
     const dpr = Math.min(4, Math.max(1, (window.devicePixelRatio || 1) * 1.5))
     const w = el.clientWidth,
       h = el.clientHeight
     const backingW = Math.max(1, Math.floor(w * dpr))
     const backingH = Math.max(1, Math.floor(h * dpr))
     const size = sizeRef.current
+    let mainResized = false
     if (size.w !== backingW || size.h !== backingH || size.dpr !== dpr) {
       el.width = backingW
       el.height = backingH
       sizeRef.current = { w: backingW, h: backingH, dpr }
+      mainResized = true
     }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    ctx.clearRect(0, 0, w, h)
+
+    // ── Static cache: paint heavy layer to offscreen only when non-currentFrame deps change ──
+    let off = staticCanvasRef.current
+    if (!off) {
+      off = document.createElement("canvas")
+      staticCanvasRef.current = off
+    }
+    const cache = staticCacheRef.current
+    const needRepaintStatic =
+      mainResized ||
+      cache.w !== backingW ||
+      cache.h !== backingH ||
+      cache.clip !== clip ||
+      cache.pxPerFrame !== pxPerFrame ||
+      cache.yZoom !== yZoom ||
+      cache.scrollX !== scrollX ||
+      cache.selectedBone !== selectedBone ||
+      cache.selectedMorph !== selectedMorph ||
+      cache.visibleBones !== visibleBones ||
+      cache.selectedKeyframes !== selectedKeyframes ||
+      cache.tab !== tab
 
     const ox = LABEL_W - scrollX
     const dopeY = h - DOPE_H
@@ -461,6 +511,16 @@ function TimelineCanvas({
     const vMax = axCenter + axHalf
     const toY = (v: number) => curveTop + (1 - (v - vMin) / (vMax - vMin)) * curveH
     const toX = (f: number) => ox + f * pxPerFrame
+
+    if (needRepaintStatic) {
+    if (off.width !== backingW || off.height !== backingH) {
+      off.width = backingW
+      off.height = backingH
+    }
+    const ctx = off.getContext("2d")
+    if (!ctx) return
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, w, h)
 
     // ── Backgrounds ──
     ctx.fillStyle = "rgba(0,0,0,0)"
@@ -513,7 +573,6 @@ function TimelineCanvas({
     ctx.fillRect(0, curveTop, LABEL_W, curveBot - curveTop)
 
     ctx.font = `9px ${FONT}`
-    const isRight = false
     const isRotAxis = channels[0]?.group === "rot"
     // Snap tick iteration to multiples of subStep within the current view range.
     const firstTick = Math.ceil(vMin / ax.subStep) * ax.subStep
@@ -617,16 +676,7 @@ function TimelineCanvas({
             }
           }
 
-          // Readout at playhead
-          ctx.font = `10px ${FONT}`
-          ctx.textBaseline = "top"
-          ctx.textAlign = "right"
-          let val = 0
-          for (const k of morphKfs) {
-            if (k.frame <= currentFrame) val = k.weight
-          }
-          ctx.fillStyle = MORPH_COLOR
-          ctx.fillText(`Weight: ${val.toFixed(2)}`, w - 8, curveTop + 5)
+          // (value readout is drawn in the per-tick overlay below)
         } else {
           ctx.fillStyle = C.label
           ctx.font = `13px ${FONT}`
@@ -703,27 +753,7 @@ function TimelineCanvas({
           }
         }
 
-        // Value readout at playhead
-        ctx.font = `10px ${FONT}`
-        ctx.textBaseline = "top"
-        const readoutX = isRight ? LABEL_W + 8 : w - 8
-        ctx.textAlign = isRight ? "left" : "right"
-        // Fixed-width formatting so columns line up: pad sign + integer part to a
-        // common width per group so the decimal points align across rows.
-        const isRotGroup = channels[0].group === "rot"
-        const numWidth = isRotGroup ? 7 : 6 // e.g. "-180.0", " -5.7"
-        const formatVal = (v: number) => {
-          const s = isRotGroup ? `${v.toFixed(1)}°` : v.toFixed(2)
-          return s.padStart(numWidth, " ")
-        }
-        channels.forEach((ch, i) => {
-          let val = 0
-          for (const k of keyframes) {
-            if (k.frame <= currentFrame) val = ch.get(k)
-          }
-          ctx.fillStyle = ch.color
-          ctx.fillText(`${ch.label}: ${formatVal(val)}`, readoutX, curveTop + 5 + i * 13)
-        })
+        // (value readout is drawn in the per-tick overlay below)
       } else {
         ctx.fillStyle = C.label
         ctx.font = `13px ${FONT}`
@@ -794,28 +824,87 @@ function TimelineCanvas({
     ctx.textBaseline = "middle"
     ctx.fillText("Keys", LABEL_W - 6, dopeMid + 2)
 
-    // ── Playhead ──
-    const px = toX(currentFrame)
-    if (px >= LABEL_W && px <= w) {
-      const g = ctx.createLinearGradient(px - 14, 0, px + 14, 0)
-      g.addColorStop(0, "transparent")
-      g.addColorStop(0.5, C.playheadGlow)
-      g.addColorStop(1, "transparent")
-      ctx.fillStyle = g
-      ctx.fillRect(px - 14, RULER_H, 28, h - RULER_H)
-      ctx.strokeStyle = C.playhead
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.moveTo(px, 0)
-      ctx.lineTo(px, h)
-      ctx.stroke()
-      ctx.fillStyle = C.playhead
-      ctx.beginPath()
-      ctx.moveTo(px - 5, 0)
-      ctx.lineTo(px + 5, 0)
-      ctx.lineTo(px, 7)
-      ctx.closePath()
-      ctx.fill()
+      cache.w = backingW
+      cache.h = backingH
+      cache.clip = clip
+      cache.pxPerFrame = pxPerFrame
+      cache.yZoom = yZoom
+      cache.scrollX = scrollX
+      cache.selectedBone = selectedBone
+      cache.selectedMorph = selectedMorph
+      cache.visibleBones = visibleBones
+      cache.selectedKeyframes = selectedKeyframes
+      cache.tab = tab
+    }
+
+    // ── Composite cached static layer onto the visible canvas ──
+    mainCtx.setTransform(1, 0, 0, 1, 0, 0)
+    mainCtx.clearRect(0, 0, backingW, backingH)
+    mainCtx.drawImage(off, 0, 0)
+    mainCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+    // ── Per-tick overlay: value readout (depends on currentFrame) ──
+    {
+      const ctx = mainCtx
+      if (tab === "morph" && selectedMorph) {
+        const morphKfs = clip.morphTracks.get(selectedMorph)
+        if (morphKfs && morphKfs.length > 0) {
+          ctx.font = `10px ${FONT}`
+          ctx.textBaseline = "top"
+          ctx.textAlign = "right"
+          let val = 0
+          for (const k of morphKfs) {
+            if (k.frame <= currentFrame) val = k.weight
+          }
+          ctx.fillStyle = MORPH_COLOR
+          ctx.fillText(`Weight: ${val.toFixed(2)}`, w - 8, curveTop + 5)
+        }
+      } else if (selectedBone) {
+        const keyframes = clip.boneTracks.get(selectedBone)
+        if (keyframes && keyframes.length > 0) {
+          ctx.font = `10px ${FONT}`
+          ctx.textBaseline = "top"
+          ctx.textAlign = "right"
+          const isRotGroup = channels[0].group === "rot"
+          const numWidth = isRotGroup ? 7 : 6
+          const formatVal = (v: number) => {
+            const s = isRotGroup ? `${v.toFixed(1)}°` : v.toFixed(2)
+            return s.padStart(numWidth, " ")
+          }
+          channels.forEach((ch, i) => {
+            let val = 0
+            for (const k of keyframes) {
+              if (k.frame <= currentFrame) val = ch.get(k)
+            }
+            ctx.fillStyle = ch.color
+            ctx.fillText(`${ch.label}: ${formatVal(val)}`, w - 8, curveTop + 5 + i * 13)
+          })
+        }
+      }
+
+      // ── Playhead ──
+      const px = toX(currentFrame)
+      if (px >= LABEL_W && px <= w) {
+        const g = ctx.createLinearGradient(px - 14, 0, px + 14, 0)
+        g.addColorStop(0, "transparent")
+        g.addColorStop(0.5, C.playheadGlow)
+        g.addColorStop(1, "transparent")
+        ctx.fillStyle = g
+        ctx.fillRect(px - 14, RULER_H, 28, h - RULER_H)
+        ctx.strokeStyle = C.playhead
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(px, 0)
+        ctx.lineTo(px, h)
+        ctx.stroke()
+        ctx.fillStyle = C.playhead
+        ctx.beginPath()
+        ctx.moveTo(px - 5, 0)
+        ctx.lineTo(px + 5, 0)
+        ctx.lineTo(px, 7)
+        ctx.closePath()
+        ctx.fill()
+      }
     }
   }, [clip, pxPerFrame, yZoom, scrollX, currentFrame, selectedBone, selectedMorph, visibleBones, selectedKeyframes, tab, getDopeFrames])
 
@@ -1079,11 +1168,8 @@ export function Timeline({
     selectedMorph,
     selectedKeyframes,
     setSelectedKeyframes,
-    currentFrame,
-    setCurrentFrame,
-    playing,
-    setPlaying,
   } = useStudio()
+  const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   const fc = clip?.frameCount ?? 0
   const [endDraft, setEndDraft] = useState<string | null>(null)
   const [frameDraft, setFrameDraft] = useState<string | null>(null)
