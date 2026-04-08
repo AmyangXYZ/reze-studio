@@ -1,6 +1,7 @@
 "use client"
 
 import { useRef, useState, useEffect, useCallback, useMemo, memo } from "react"
+import { ChevronRight } from "lucide-react"
 import { BONE_GROUPS } from "@/lib/animation"
 import { cn } from "@/lib/utils"
 import type { AnimationClip } from "reze-engine"
@@ -44,10 +45,14 @@ const GroupRow = memo(function GroupRow({
           : "border-transparent hover:bg-white/[0.03]",
       )}
     >
-      <span className="mr-1 inline-flex size-3 shrink-0 items-center justify-center text-[9px] leading-none">
-        <span className={cn("transition-transform", isSelected ? "rotate-90 text-blue-400" : "text-muted-foreground")}>
-          ▶
-        </span>
+      <span className="mr-1 inline-flex size-3 shrink-0 items-center justify-center leading-none">
+        <ChevronRight
+          className={cn(
+            "size-3 transition-transform",
+            isSelected ? "rotate-90 text-blue-400" : "text-muted-foreground",
+          )}
+          strokeWidth={2.5}
+        />
       </span>
       <span className="min-w-0 flex-1 truncate py-[1px] ">
         {name}{" "}

@@ -2,7 +2,6 @@
 
 import {
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   useMemo,
@@ -34,7 +33,7 @@ import { Timeline } from "@/components/timeline"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
-import { usePlayback } from "@/context/playback-context"
+import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import {
   EngineBridge,
   STUDIO_ANIM_NAME,
@@ -373,6 +372,11 @@ export function StudioPage() {
   const { commit, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes } =
     useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
+  /** Single source of truth for the live playhead — the playback store owns
+   *  this ref. EngineBridge's rAF loop writes the per-frame value into it so
+   *  non-subscribing consumers (PMX swap, property inspector) see the live
+   *  frame without forcing a re-render. */
+  const currentFrameRef = usePlaybackFrameRef()
   /** Model finished loading (file menu + export need a live Model instance). */
   const [studioReady, setStudioReady] = useState(false)
 
@@ -389,7 +393,6 @@ export function StudioPage() {
   const [modelBoneOrder, setModelBoneOrder] = useState<string[]>([])
   /** From `model.getMorphing().morphs` (engine has no `getMorphs()` alias yet). */
   const [morphNames, setMorphNames] = useState<string[]>([])
-  const [morphWeightReadout, setMorphWeightReadout] = useState<number | null>(null)
 
   /** Bones with tracks in the current clip (and on the model) — timeline rows + keying. */
   const clipBones = useMemo(() => {
@@ -429,7 +432,6 @@ export function StudioPage() {
   const playheadDrawRef = useRef<((frame: number) => void) | null>(null)
   /** Snapshotted before async PMX swap so clip/playhead survive `await loadModel`. */
   const clipRef = useRef<AnimationClip | null>(null)
-  const currentFrameRef = useRef(0)
   const clipDisplayNameRef = useRef("clip")
   const visibleBones = useMemo(() => {
     const g = BONE_GROUPS[selectedGroup]
@@ -440,9 +442,6 @@ export function StudioPage() {
   useEffect(() => {
     clipRef.current = clip
   }, [clip])
-  useEffect(() => {
-    currentFrameRef.current = currentFrame
-  }, [currentFrame])
   useEffect(() => {
     clipDisplayNameRef.current = clipDisplayName
   }, [clipDisplayName])
@@ -622,7 +621,11 @@ export function StudioPage() {
     const frame = Math.round(Math.max(0, currentFrame))
 
     if (selectedMorph && !selectedBone) {
-      const w = morphWeightReadout ?? 0
+      // Read the current weight straight from the engine — it's the live
+      // interpolated value whether we're paused or playing.
+      const morphs = model.getMorphing().morphs
+      const idx = morphs.findIndex((m) => m.name === selectedMorph)
+      const w = idx >= 0 ? (model.getMorphWeights()[idx] ?? 0) : 0
       commit(upsertMorphKeyframeAtFrame(clip, selectedMorph, frame, w))
       setSelectedKeyframes([{ type: "curve", morph: selectedMorph, frame }])
       return
@@ -649,7 +652,7 @@ export function StudioPage() {
     boneTracks.set(selectedBone, nextTrack)
     commit({ ...clip, boneTracks })
     setSelectedKeyframes([{ type: "curve", bone: selectedBone, frame, channel: "rx" }])
-  }, [clip, selectedBone, selectedMorph, currentFrame, morphWeightReadout, commit, setSelectedKeyframes])
+  }, [clip, selectedBone, selectedMorph, currentFrame, commit, setSelectedKeyframes])
 
   const syncStudioAfterNewClip = useCallback(
     (model: Model) => {
@@ -886,7 +889,6 @@ export function StudioPage() {
         setMorphNames={setMorphNames}
         setEngineError={setEngineError}
         setStudioReady={setStudioReady}
-        setMorphWeightReadout={setMorphWeightReadout}
       />
       <div className="flex min-h-0 flex-1">
         <StudioLeftPanel

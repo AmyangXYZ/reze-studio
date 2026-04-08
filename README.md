@@ -44,7 +44,7 @@ Web-native MMD animation editor in the browser (WebGPU).
                  ├─ <StudioViewport>        memo'd — WebGPU <canvas>
                  ├─ <Timeline>              slice-subscribed — dopesheet + curve editor
                  │    └─ <TimelineCanvas>   imperative playhead + drag redraw handles
-                 ├─ <PropertiesInspector>   slice-subscribed — pose sliders, morph weight
+                 ├─ <PropertiesInspector>   slice-subscribed — pose sliders, morph weight (self-samples via rAF during playback)
                  └─ <StudioStatusFooter>    slice-subscribed — pmx name, fps, clip name
 ```
 
@@ -54,7 +54,7 @@ Web-native MMD animation editor in the browser (WebGPU).
 | ------------ | ----------------------------------- | -------------------------------------------------------------------- |
 | Document     | `context/studio-context.ts`         | External store, slice subscriptions, undo/redo target                |
 | Selection    | `context/studio-context.ts`         | Bone, morph, keyframes                                               |
-| Transport    | `context/playback-context.ts`       | External store; `currentFrame`, `playing`; ref-backed for 60Hz reads |
+| Transport    | `context/playback-context.ts`       | External store; `currentFrame`, `playing`; single store-owned `currentFrameRef` shared via `usePlaybackFrameRef()` — EngineBridge's rAF writes it, non-subscribing consumers read it |
 | Status chrome| `components/studio-status.tsx`      | External store; pmx filename, fps, transient message                 |
 | Engine refs  | `StudioPage`                        | `engineRef`, `modelRef`, `canvasRef`                                 |
 | View         | local `useState` in `Timeline`      | Zoom, scroll, tab                                                    |
@@ -77,12 +77,23 @@ drag) all share the same shape: **mutate refs/objects imperatively, repaint
 the canvas via an imperative handle, and touch React exactly once on release.**
 
 - **Playback (60Hz)** — `<EngineBridge>`'s rAF loop reads the engine clock,
-  writes `currentFrameRef.current`, and calls `playheadDrawRef.current(frame)`
-  — a handle `<TimelineCanvas>` exposes that repaints the playhead overlay
-  directly. Auto-scroll (page-turn when the playhead leaves the viewport)
-  lives in the same imperative path and only touches React at the rare
-  page-turn boundary. On pause, the final frame is flushed to `setCurrentFrame`
-  so the paused view matches what was last painted.
+  writes the live frame into the playback store's `currentFrameRef` (the
+  single ref shared via `usePlaybackFrameRef()`), and calls
+  `playheadDrawRef.current(frame)` — a handle `<TimelineCanvas>` exposes that
+  repaints the playhead overlay directly. No `setCurrentFrame` per-tick, so
+  nothing re-renders, but any non-subscribing consumer (inspector pose sample,
+  PMX swap snapshot) still sees the live frame via the ref. Auto-scroll
+  (page-turn when the playhead leaves the viewport) lives in the same
+  imperative path and only touches React at the rare page-turn boundary. On
+  pause, the final frame is flushed to `setCurrentFrame` so the paused view
+  matches what was last painted.
+- **Live pose / morph readout** — `<PropertiesInspector>` samples the selected
+  bone's pose and morph weight in isolated leaf subcomponents. While paused it
+  subscribes to `currentFrame` and re-samples on change; while playing it runs
+  its own small rAF loop reading `modelRef.current`'s `runtimeSkeleton` /
+  `getMorphWeights()` directly, gated by equality so unchanged frames don't
+  reconcile. This keeps the 60Hz work out of the parent inspector and out of
+  `<StudioPage>` entirely.
 - **Keyframe drag** — `<Timeline>`'s move callbacks mutate `kf.frame` /
   channel values / track ordering **in place** and fire `dragRedrawRef.current()`,
   which bumps an internal drag version used by the static-layer cache

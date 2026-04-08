@@ -54,7 +54,6 @@ interface EngineBridgeProps {
   setMorphNames: Dispatch<SetStateAction<string[]>>
   setEngineError: Dispatch<SetStateAction<string | null>>
   setStudioReady: Dispatch<SetStateAction<boolean>>
-  setMorphWeightReadout: Dispatch<SetStateAction<number | null>>
 }
 
 export function EngineBridge({
@@ -70,10 +69,8 @@ export function EngineBridge({
   setMorphNames,
   setEngineError,
   setStudioReady,
-  setMorphWeightReadout,
 }: EngineBridgeProps) {
   const clip = useStudioSelector((s) => s.clip)
-  const selectedMorph = useStudioSelector((s) => s.selectedMorph)
   const { commit, setClipDisplayName, setSelectedMorph } = useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   const { setPmxFileName: setStatusPmxFileName, setFps: setStatusFps } = useStudioStatusActions()
@@ -155,7 +152,6 @@ export function EngineBridge({
       setPmxBoneNames(new Set())
       setMorphNames([])
       setSelectedMorph(null)
-      setMorphWeightReadout(null)
       setStatusPmxFileName("—")
       setStatusFps(null)
       lastFpsRef.current = null
@@ -186,19 +182,7 @@ export function EngineBridge({
     if (!playing) {
       model.seek(Math.max(0, currentFrame) / 30)
     }
-    if (!selectedMorph) {
-      setMorphWeightReadout(null)
-      return
-    }
-    const morphing = model.getMorphing()
-    const idx = morphing.morphs.findIndex((m) => m.name === selectedMorph)
-    if (idx < 0) {
-      setMorphWeightReadout(null)
-      return
-    }
-    const w = model.getMorphWeights()[idx]
-    setMorphWeightReadout((prev) => (prev === w ? prev : w))
-  }, [currentFrame, clip, selectedMorph, playing, modelRef, setMorphWeightReadout])
+  }, [currentFrame, clip, playing, modelRef])
 
   // ─── Play / pause ───────────────────────────────────────────────────
   useEffect(() => {

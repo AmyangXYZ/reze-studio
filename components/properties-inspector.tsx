@@ -167,29 +167,24 @@ function useLivePose(
   const sample = useCallback((): LivePose | null => {
     const model = modelRef.current
     if (!model || !selectedBone || !clip) return null
-    if (playing) {
-      // Engine owns the clock; runtimeSkeleton is already up-to-date. The
-      // store's playbackFrameRef is frozen during playback (engine-bridge
-      // writes the live frame into studio's *local* ref, not the store's),
-      // so we can't use it for the keyframe-snap lookup — and we don't need
-      // to: fractional playback frames rarely land on an exact keyframe, so
-      // just return the engine pose directly.
-      const p = readLocalPoseAfterSeek(model, selectedBone)
-      if (!p) return null
-      return { euler: quatToEuler(p.rotation), translation: p.translation }
-    }
-    // Paused path: React owns the clock — seek first, then prefer the stored
-    // keyframe at the current integer frame (bones under IK chains otherwise
-    // display the post-IK pose instead of the value that's in the keyframe).
     const cf = playbackFrameRef.current
-    model.seek(Math.max(0, cf) / 30)
+    // Paused: React owns the clock, so seek the engine first. Playing: engine
+    // owns the clock and the rAF loop in <EngineBridge/> has already written
+    // the live frame into playbackFrameRef — do NOT seek (would fight play).
+    if (!playing) model.seek(Math.max(0, cf) / 30)
     const p = readLocalPoseAfterSeek(model, selectedBone)
     if (!p) return null
-    const frameInt = Math.round(Math.max(0, cf))
-    const kfAt = clip.boneTracks.get(selectedBone)?.find((k) => k.frame === frameInt)
-    return kfAt
-      ? { euler: quatToEuler(kfAt.rotation), translation: kfAt.translation }
-      : { euler: quatToEuler(p.rotation), translation: p.translation }
+    // When paused at an integer frame, prefer the stored keyframe value: the
+    // runtime skeleton returns the post-IK pose, so bones under an IK chain
+    // would otherwise display a different value than what's in the keyframe.
+    // During playback we skip the snap — fractional frames rarely land on a
+    // keyframe, and the engine pose is already the interpolated truth.
+    if (!playing) {
+      const frameInt = Math.round(Math.max(0, cf))
+      const kfAt = clip.boneTracks.get(selectedBone)?.find((k) => k.frame === frameInt)
+      if (kfAt) return { euler: quatToEuler(kfAt.rotation), translation: kfAt.translation }
+    }
+    return { euler: quatToEuler(p.rotation), translation: p.translation }
   }, [modelRef, selectedBone, clip, playing, playbackFrameRef])
 
   const apply = useCallback((next: LivePose | null) => {
