@@ -8,6 +8,7 @@
  *  no engine logic in its render body. EngineBridge returns null. */
 
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -78,6 +79,43 @@ export function EngineBridge({
 
   const playRef = useRef(false)
   const lastFpsRef = useRef<number | null>(null)
+
+  // ─── Physics reset after animation-time jumps ───────────────────────
+  //     `model.seek` retargets the animation; rigid bodies only catch up
+  //     on the engine's next tick, so resetting in the same call zeroes
+  //     velocities against the *old* pose and things explode. One rAF
+  //     of delay lets the engine propagate the new pose to physics, then
+  //     `resetPhysics` stabilizes velocities at the new rest state.
+  //
+  //     Small frame-to-frame deltas (smooth scrub drag) don't need a
+  //     reset — physics can integrate continuously between neighboring
+  //     poses without blowing up. Only jumps beyond `RESET_PHYSICS_FRAME_THRESHOLD`
+  //     trigger the next-frame reset. Bursts of qualifying seeks collapse
+  //     into one reset via rAF cancellation.
+  const RESET_PHYSICS_FRAME_THRESHOLD = 2
+  const physicsResetRafRef = useRef<number | null>(null)
+  const lastSeekFrameRef = useRef<number | null>(null)
+
+  const maybeResetPhysicsAfterSeek = useCallback(
+    (frame: number) => {
+      const prev = lastSeekFrameRef.current
+      lastSeekFrameRef.current = frame
+      if (prev !== null && Math.abs(frame - prev) <= RESET_PHYSICS_FRAME_THRESHOLD) return
+      if (physicsResetRafRef.current !== null) cancelAnimationFrame(physicsResetRafRef.current)
+      physicsResetRafRef.current = requestAnimationFrame(() => {
+        physicsResetRafRef.current = null
+        engineRef.current?.resetPhysics()
+      })
+    },
+    [engineRef],
+  )
+
+  useEffect(() => {
+    return () => {
+      if (physicsResetRafRef.current !== null) cancelAnimationFrame(physicsResetRafRef.current)
+      physicsResetRafRef.current = null
+    }
+  }, [])
 
   // ─── Engine init + initial model/VMD load ───────────────────────────
   useEffect(() => {
@@ -164,6 +202,8 @@ export function EngineBridge({
             setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
             modelRef.current?.show(STUDIO_ANIM_NAME)
             modelRef.current?.seek(0)
+            lastSeekFrameRef.current = 0
+            requestAnimationFrame(() => engine.resetPhysics())
             if (modelRef.current?.name === "reze") modelRef.current?.setMorphWeight("抗穿模", 0.5)
           }
         } catch (e) {
@@ -204,8 +244,10 @@ export function EngineBridge({
     const model = modelRef.current
     if (!model || !clip) return
     model.loadClip(STUDIO_ANIM_NAME, clip)
-    model.seek(Math.max(0, currentFrameRef.current) / 30)
-  }, [clip, currentFrameRef, modelRef])
+    const f = Math.max(0, currentFrameRef.current)
+    model.seek(f / 30)
+    maybeResetPhysicsAfterSeek(f)
+  }, [clip, currentFrameRef, modelRef, maybeResetPhysicsAfterSeek])
 
   // ─── Scrub: when paused, React owns the playhead and pushes seeks into
   //     the engine. When playing, the engine owns the playhead; the rAF
@@ -214,9 +256,11 @@ export function EngineBridge({
     const model = modelRef.current
     if (!model || !clip) return
     if (!playing) {
-      model.seek(Math.max(0, currentFrame) / 30)
+      const f = Math.max(0, currentFrame)
+      model.seek(f / 30)
+      maybeResetPhysicsAfterSeek(f)
     }
-  }, [currentFrame, clip, playing, modelRef])
+  }, [currentFrame, clip, playing, modelRef, maybeResetPhysicsAfterSeek])
 
   // ─── Play / pause ───────────────────────────────────────────────────
   useEffect(() => {
@@ -229,13 +273,15 @@ export function EngineBridge({
         startFrame = 0
         setCurrentFrame(0)
       }
-      model.seek(Math.max(0, startFrame) / 30)
+      const f = Math.max(0, startFrame)
+      model.seek(f / 30)
+      maybeResetPhysicsAfterSeek(f)
       model.play()
       if (model.name === "reze") model.setMorphWeight("抗穿模", 0.5)
     } else {
       model.pause()
     }
-  }, [playing, clip, frameCount, setCurrentFrame, currentFrameRef, modelRef])
+  }, [playing, clip, frameCount, setCurrentFrame, currentFrameRef, modelRef, maybeResetPhysicsAfterSeek])
 
   // Clamp currentFrame to [0, frameCount] whenever the clip shrinks.
   useEffect(() => {

@@ -516,6 +516,7 @@ export function StudioPage() {
       setSelectedBone(null)
       setSelectedMorph(name)
       setSelectedKeyframes([])
+      setTimelineTab("morph")
     },
     [setSelectedBone, setSelectedMorph, setSelectedKeyframes],
   )
