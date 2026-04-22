@@ -179,7 +179,7 @@ export const BoneList = memo(function BoneList({
   }
 
   return (
-    <div ref={containerRef} className="h-full overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" onScroll={onScroll}>
+    <div ref={containerRef} className="h-full touch-pan-y overscroll-contain overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" onScroll={onScroll}>
       <div className="px-3 py-1 text-[11px] font-medium uppercase leading-tight tracking-widest text-muted-foreground">
         Bones
       </div>
