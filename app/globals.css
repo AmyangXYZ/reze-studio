@@ -6,6 +6,15 @@
   outline: none;
 }
 
+/* Radix ScrollArea ships `display: table` on the inner content wrapper
+ * (radix-ui/react-scroll-area index.mjs:130). On iOS Safari, `display: table`
+ * inside an `overflow: scroll` ancestor swallows touch-pan gestures — desktop
+ * wheel still works, but drag-to-scroll on iPad does not. Forcing the wrapper
+ * back to block display restores native touch scrolling. */
+[data-radix-scroll-area-viewport] > div {
+  display: block !important;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
