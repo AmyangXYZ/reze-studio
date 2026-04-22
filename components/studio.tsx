@@ -28,10 +28,13 @@ import {
 } from "@/components/ui/menubar"
 import { BoneList } from "@/components/bone-list"
 import { MorphList } from "@/components/morph-list"
+import { MaterialList } from "@/components/material-list"
 import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline } from "@/components/timeline"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
-import type { AnimationClip, BoneKeyframe, MorphKeyframe } from "reze-engine"
+import { autoClassifyMaterials } from "@/lib/materials"
+import type { AnimationClip, BoneKeyframe, MaterialPresetMap, MorphKeyframe } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import {
@@ -394,6 +397,13 @@ export function StudioPage() {
   const [modelBoneOrder, setModelBoneOrder] = useState<string[]>([])
   /** From `model.getMorphing().morphs` (engine has no `getMorphs()` alias yet). */
   const [morphNames, setMorphNames] = useState<string[]>([])
+  /** PMX material names + the preset map pushed to the engine. Panel UI reads
+   *  presets; user edits round-trip through `applyMaterialPresets`. */
+  const [materialNames, setMaterialNames] = useState<string[]>([])
+  const [materialPresets, setMaterialPresets] = useState<MaterialPresetMap>({})
+  /** Hidden material names — mirror of the engine's `setMaterialVisible` state
+   *  so the Materials panel checkbox reflects reality across model swaps. */
+  const [hiddenMaterials, setHiddenMaterials] = useState<ReadonlySet<string>>(() => new Set())
 
   /** Bones with tracks in the current clip (and on the model) — timeline rows + keying. */
   const clipBones = useMemo(() => {
@@ -411,6 +421,8 @@ export function StudioPage() {
   const [clipVersion, setClipVersion] = useState(0)
   /** Lifted from Timeline so PropertiesInspector sliders + keyframe selection can sync it. */
   const [timelineTab, setTimelineTab] = useState("allRot")
+  /** Right aside tab: "properties" (selection-bound) vs "materials" (model-bound). */
+  const [rightPanelTab, setRightPanelTab] = useState<"properties" | "materials">("properties")
 
   /** Folder upload contained multiple `.pmx`; user picks one then clicks Load. */
   const [pmxPickFiles, setPmxPickFiles] = useState<File[] | null>(null)
@@ -559,6 +571,46 @@ export function StudioPage() {
   useEffect(() => {
     setSelectedKeyframes((prev) => prev.filter((s) => s.type !== "curve" || !s.bone || pmxBoneNames.has(s.bone)))
   }, [pmxBoneNames, setSelectedKeyframes])
+
+  // ─── Material preset sync ───────────────────────────────────────────
+  //     Whenever the model's material list changes (boot, PMX upload),
+  //     auto-classify via keyword heuristic and push the map to the engine.
+  //     EngineBridge also applies presets inline on boot to avoid a one-frame
+  //     default-shader flash — this effect is the React-state mirror.
+  useEffect(() => {
+    if (materialNames.length === 0) {
+      setMaterialPresets({})
+      setHiddenMaterials(new Set())
+      return
+    }
+    const next = autoClassifyMaterials(materialNames)
+    setMaterialPresets(next)
+    setHiddenMaterials(new Set())
+    engineRef.current?.setMaterialPresets(loadedModelNameRef.current, next)
+  }, [materialNames])
+
+  const applyMaterialPresets = useCallback((next: MaterialPresetMap) => {
+    setMaterialPresets(next)
+    engineRef.current?.setMaterialPresets(loadedModelNameRef.current, next)
+  }, [])
+
+  const applyMaterialVisible = useCallback((materialName: string, visible: boolean) => {
+    setHiddenMaterials((prev) => {
+      const next = new Set(prev)
+      if (visible) next.delete(materialName)
+      else next.add(materialName)
+      return next
+    })
+    engineRef.current?.setMaterialVisible(loadedModelNameRef.current, materialName, visible)
+  }, [])
+
+  // Any selection (bone/morph/keyframe) belongs to the Properties tab — flip
+  // back so users don't lose the context when they're focused on Materials.
+  useEffect(() => {
+    if (selectedBone || selectedMorph || selectedKeyframes.length > 0) {
+      setRightPanelTab("properties")
+    }
+  }, [selectedBone, selectedMorph, selectedKeyframes])
 
   // Engine init, clip upload, scrub/seek, play/pause, clamp, playback rAF
   // loop all live in <EngineBridge /> below — StudioPage just owns chrome.
@@ -748,9 +800,11 @@ export function StudioPage() {
       const boneSet = new Set(sk)
       const morphNamesList = model.getMorphing().morphs.map((m) => m.name)
       const morphSet = new Set(morphNamesList)
+      const materialNamesList = model.getMaterials().map((m) => m.name)
       setPmxBoneNames(boneSet)
       setModelBoneOrder(sk)
       setMorphNames(morphNamesList)
+      setMaterialNames(materialNamesList)
       setStatusPmxFileName(pmxFileName.trim() || `${displayStem}.pmx`)
       setSelectedBone((prev) => (prev && boneSet.has(prev) ? prev : null))
       setSelectedMorph((prev) => (prev && morphSet.has(prev) ? prev : null))
@@ -952,6 +1006,7 @@ export function StudioPage() {
         setPmxBoneNames={setPmxBoneNames}
         setModelBoneOrder={setModelBoneOrder}
         setMorphNames={setMorphNames}
+        setMaterialNames={setMaterialNames}
         setEngineError={setEngineError}
         setStudioReady={setStudioReady}
       />
@@ -993,25 +1048,42 @@ export function StudioPage() {
           </div>
         </div>
 
-        {/* Right sidebar — properties for selected bone / morph / keyframe context */}
+        {/* Right sidebar — Properties (selection) + Materials (per-model) tabs */}
         <aside className="flex w-64 shrink-0 flex-col border-l border-sidebar-border text-sidebar-foreground">
-          <div className="flex min-h-9 shrink-0 items-center border-b border-sidebar-border px-3 py-2">
-            <span className="text-[11px] font-medium uppercase tracking-widest text-sidebar-foreground/70">
-              Properties
-            </span>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-2 text-[11px] [scrollbar-width:thin]">
-            <PropertiesInspector
-              modelRef={modelRef}
-              onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
-              onDeleteSelectedKeyframes={deleteSelectedKeyframes}
-              onSimplifySelectedBoneTrack={simplifySelectedBoneTrack}
-              onClearSelectedBoneTrack={clearSelectedBoneTrack}
-              timelineTab={timelineTab}
-              setTimelineTab={setTimelineTab}
-              clipVersion={clipVersion}
-            />
-          </div>
+          <Tabs
+            value={rightPanelTab}
+            onValueChange={(v) => setRightPanelTab(v as "properties" | "materials")}
+            className="min-h-0 flex-1"
+          >
+            <TabsList className="flex min-h-9 w-full shrink-0 items-center gap-4 border-b border-sidebar-border px-3">
+              <TabsTrigger value="properties">Properties</TabsTrigger>
+              <TabsTrigger value="materials">Materials</TabsTrigger>
+            </TabsList>
+            <TabsContent
+              value="properties"
+              className="overflow-y-auto overflow-x-hidden px-3 py-2 text-[11px] [scrollbar-width:thin]"
+            >
+              <PropertiesInspector
+                modelRef={modelRef}
+                onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
+                onDeleteSelectedKeyframes={deleteSelectedKeyframes}
+                onSimplifySelectedBoneTrack={simplifySelectedBoneTrack}
+                onClearSelectedBoneTrack={clearSelectedBoneTrack}
+                timelineTab={timelineTab}
+                setTimelineTab={setTimelineTab}
+                clipVersion={clipVersion}
+              />
+            </TabsContent>
+            <TabsContent value="materials" className="overflow-hidden">
+              <MaterialList
+                materialNames={materialNames}
+                presets={materialPresets}
+                hiddenMaterials={hiddenMaterials}
+                onChangePresets={applyMaterialPresets}
+                onChangeVisible={applyMaterialVisible}
+              />
+            </TabsContent>
+          </Tabs>
         </aside>
       </div>
 

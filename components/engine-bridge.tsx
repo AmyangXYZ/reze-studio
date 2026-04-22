@@ -20,6 +20,7 @@ import { Engine, Model, Vec3 } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import { usePlayback } from "@/context/playback-context"
 import { useStudioStatusActions } from "@/components/studio-status"
+import { autoClassifyMaterials } from "@/lib/materials"
 
 // ─── Constants shared with StudioPage file handlers ──────────────────────
 export const MODEL_PATH = "/models/塞尔凯特/塞尔凯特.pmx"
@@ -53,6 +54,7 @@ interface EngineBridgeProps {
   setPmxBoneNames: Dispatch<SetStateAction<ReadonlySet<string>>>
   setModelBoneOrder: Dispatch<SetStateAction<string[]>>
   setMorphNames: Dispatch<SetStateAction<string[]>>
+  setMaterialNames: Dispatch<SetStateAction<string[]>>
   setEngineError: Dispatch<SetStateAction<string | null>>
   setStudioReady: Dispatch<SetStateAction<boolean>>
 }
@@ -68,6 +70,7 @@ export function EngineBridge({
   setPmxBoneNames,
   setModelBoneOrder,
   setMorphNames,
+  setMaterialNames,
   setEngineError,
   setStudioReady,
 }: EngineBridgeProps) {
@@ -130,9 +133,8 @@ export function EngineBridge({
           camera: {
             distance: 31.5,
             target: new Vec3(0, 11.5, 0),
-            
           },
-        bloom:{color: new Vec3(1, 0.1, 0.88)},
+          bloom: { color: new Vec3(1, 0.1, 0.88) },
         })
         await engine.init()
         if (disposed) return
@@ -145,38 +147,16 @@ export function EngineBridge({
           setPmxBoneNames(new Set(sk))
           setModelBoneOrder(sk)
           setMorphNames(model.getMorphing().morphs.map((m) => m.name))
+          const materialNames = model.getMaterials().map((m) => m.name)
+          setMaterialNames(materialNames)
           setStatusPmxFileName(BUNDLED_PMX_FILENAME)
           model.setMorphWeight("抗穿模", 0.5)
 
-          engine.setMaterialPresets("reze", {
-            eye: ["眼睛", "眼白", "目白", "右瞳","左瞳","眉毛"],
-            face: ["脸", "face01"],
-            body: ["皮肤", "skin"],
-            hair: ["头发", "hair_f"],
-            cloth_smooth: [
-              "衣服",
-              "裙子",
-              "裙带",
-              "裙布",
-              "外套",
-              "外套饰",
-              "裤子",
-              "裤子0",
-              "腿环",
-              "发饰",
-              "鞋子",
-              "鞋子饰",
-              "shirt",
-              "shoes",
-              "shorts",
-              "trigger",
-              "dress",
-              "hair_accessory",
-              "cloth01_shoes"
-            ],
-            stockings: ["袜子", "stockings"],
-            metal: ["metal01","earring"],
-          })
+          // Keep boot deterministic: classify before the render loop starts so
+          // the first frame uses the correct NPR buckets instead of falling
+          // through to the default Principled BSDF path. StudioPage's materials
+          // effect will mirror the same map into React state (idempotent).
+          engine.setMaterialPresets("reze", autoClassifyMaterials(materialNames))
 
           engine.addGround({ diffuseColor: new Vec3(0.05, 0.04, 0.06) })
         } catch {
@@ -225,6 +205,7 @@ export function EngineBridge({
       setModelBoneOrder([])
       setPmxBoneNames(new Set())
       setMorphNames([])
+      setMaterialNames([])
       setSelectedMorph(null)
       setStatusPmxFileName("—")
       setStatusFps(null)

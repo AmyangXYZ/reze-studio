@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc:*)",
+      "Bash(cat *)",
+      "Bash(echo \"---EXIT: $?---\")",
+      "Bash(npx next *)",
+      "Bash(npx eslint *)",
+      "Bash(npm run *)"
+    ]
+  }
+}
