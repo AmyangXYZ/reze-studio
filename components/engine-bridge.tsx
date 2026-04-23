@@ -299,7 +299,11 @@ export function EngineBridge({
     return () => {
       cancelAnimationFrame(raf)
       // Flush the final frame into React state so the paused view matches
-      // what the playhead was last showing.
+      // what the playhead was last showing. Sync `lastSeekFrameRef` first so
+      // the scrub effect this flush triggers sees delta=0 and skips the
+      // physics reset — pausing from playback isn't a jump, physics is
+      // already in a valid state.
+      lastSeekFrameRef.current = currentFrameRef.current
       setCurrentFrame(currentFrameRef.current)
     }
   }, [playing, frameCount, setCurrentFrame, setPlaying, currentFrameRef, modelRef, playheadDrawRef])
