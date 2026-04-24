@@ -287,6 +287,12 @@ export function EngineBridge({
       const progress = m.getAnimationProgress()
       const frame = progress.current * 30
       if (frame >= frameCount) {
+        // Natural end isn't a jump — physics integrated continuously through
+        // the last frame. Sync seek tracking BEFORE setState so the scrub
+        // useLayoutEffect (which runs on the resulting commit, ahead of this
+        // effect's cleanup) sees delta=0 and skips the physics reset.
+        currentFrameRef.current = frameCount
+        lastSeekFrameRef.current = frameCount
         setCurrentFrame(frameCount)
         setPlaying(false)
         return
