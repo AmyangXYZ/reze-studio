@@ -6,7 +6,8 @@
       "Bash(echo \"---EXIT: $?---\")",
       "Bash(npx next *)",
       "Bash(npx eslint *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "WebSearch"
     ]
   }
 }

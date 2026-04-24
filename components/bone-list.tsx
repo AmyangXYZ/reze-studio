@@ -17,6 +17,12 @@ interface BoneListProps {
   selectedBone: string | null
   onSelectGroup: (group: string) => void
   onSelectBone: (bone: string) => void
+  /** External reveal request (from viewport raycast). `epoch` bumps per
+   *  request so repeated picks of the same bone still re-trigger the scroll.
+   *  The parent is responsible for ensuring `selectedGroup` contains the
+   *  target bone before bumping — otherwise the row isn't rendered and the
+   *  scroll is a no-op. */
+  revealRequest: { bone: string; epoch: number } | null
 }
 
 type Row =
@@ -108,6 +114,7 @@ export const BoneList = memo(function BoneList({
   selectedBone,
   onSelectGroup,
   onSelectBone,
+  revealRequest,
 }: BoneListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -156,6 +163,26 @@ export const BoneList = memo(function BoneList({
     }
     return { offsets: offs, total: t }
   }, [rows])
+
+  // ─── Scroll-to-bone (viewport raycast) ───────────────────────────────
+  //     Fires when the parent bumps `revealRequest.epoch`. By then it has
+  //     already flipped `selectedGroup` to a group containing the target, so
+  //     `offsets` below reflects the expanded layout and we can center the
+  //     row in one scrollTo. Initial render (`epoch === 0` conceptually, but
+  //     we guard on the request being nullish) is skipped so first-mount
+  //     doesn't auto-scroll.
+  const lastRevealEpochRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!revealRequest) return
+    if (lastRevealEpochRef.current === revealRequest.epoch) return
+    lastRevealEpochRef.current = revealRequest.epoch
+    const el = containerRef.current
+    if (!el) return
+    const idx = rows.findIndex((r) => r.type === "bone" && r.name === revealRequest.bone)
+    if (idx < 0) return
+    const target = Math.max(0, offsets[idx] - el.clientHeight / 2 + BONE_H / 2)
+    el.scrollTo({ top: target, behavior: "smooth" })
+  }, [revealRequest, rows, offsets])
 
   // Visible window
   const startY = scrollTop - OVERSCAN * BONE_H

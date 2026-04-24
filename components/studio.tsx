@@ -136,6 +136,7 @@ type StudioLeftPanelProps = {
   selectedBone: string | null
   onSelectGroup: (g: string) => void
   onSelectBone: (b: string) => void
+  boneListReveal: { bone: string; epoch: number } | null
   morphNames: string[]
   selectedMorph: string | null
   onSelectMorph: (name: string) => void
@@ -165,6 +166,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   selectedBone,
   onSelectGroup,
   onSelectBone,
+  boneListReveal,
   morphNames,
   selectedMorph,
   onSelectMorph,
@@ -340,6 +342,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
             selectedBone={selectedBone}
             onSelectGroup={onSelectGroup}
             onSelectBone={onSelectBone}
+            revealRequest={boneListReveal}
           />
         </div>
         <div className="flex max-h-[196px] shrink-0 flex-col border-t border-border">
@@ -427,6 +430,12 @@ export function StudioPage() {
   const sidebarBones = modelBoneOrder
 
   const [selectedGroup, setSelectedGroup] = useState("All Bones")
+  /** Viewport raycast → scroll the bone list to the picked bone. `epoch`
+   *  bumps per pick so clicking the same bone twice still re-centers it.
+   *  `revealBoneInList` below switches `selectedGroup` to one containing
+   *  the target (only if the current group doesn't) before bumping, so the
+   *  row is rendered by the time BoneList's scroll effect runs. */
+  const [boneListReveal, setBoneListReveal] = useState<{ bone: string; epoch: number } | null>(null)
   /** Bumped on new clip load / reset so Timeline can reset its local view state. */
   const [clipVersion, setClipVersion] = useState(0)
   /** Lifted from Timeline so PropertiesInspector sliders + keyframe selection can sync it. */
@@ -560,6 +569,38 @@ export function StudioPage() {
     },
     [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
   )
+
+  const revealBoneInList = useCallback(
+    (bone: string) => {
+      // Respect the user's active group filter when the target is already in
+      // it (incl. "All Bones"). Otherwise switch to the first group that
+      // contains the bone — "All Bones" is the final fallback and always
+      // matches. Bumping `epoch` triggers BoneList's scroll effect, which
+      // reads `offsets` for the (possibly new) group after the render commits.
+      const groupDef = BONE_GROUPS[selectedGroup]
+      const inCurrent =
+        selectedGroup === "All Bones" || (groupDef?.includes(bone) ?? false)
+      if (!inCurrent) {
+        let targetGroup = "All Bones"
+        for (const [groupName, def] of Object.entries(BONE_GROUPS)) {
+          if (def && def.includes(bone)) {
+            targetGroup = groupName
+            break
+          }
+        }
+        setSelectedGroup(targetGroup)
+      }
+      setBoneListReveal((prev) => ({ bone, epoch: (prev?.epoch ?? 0) + 1 }))
+    },
+    [selectedGroup],
+  )
+
+  /** Imperative handle so EngineBridge's raycast callback (created once at
+   *  engine init) always calls the latest implementation. */
+  const revealBoneInListRef = useRef(revealBoneInList)
+  useEffect(() => {
+    revealBoneInListRef.current = revealBoneInList
+  }, [revealBoneInList])
 
   const handleSelectMorph = useCallback(
     (name: string) => {
@@ -1035,6 +1076,7 @@ export function StudioPage() {
         engineRef={engineRef}
         modelRef={modelRef}
         loadedModelNameRef={loadedModelNameRef}
+        revealBoneInListRef={revealBoneInListRef}
         currentFrameRef={currentFrameRef}
         playheadDrawRef={playheadDrawRef}
         documentDirtyRef={documentDirtyRef}
@@ -1067,6 +1109,7 @@ export function StudioPage() {
           selectedBone={selectedBone}
           onSelectGroup={handleSelectGroup}
           onSelectBone={handleSelectBone}
+          boneListReveal={boneListReveal}
           morphNames={morphNames}
           selectedMorph={selectedMorph}
           onSelectMorph={handleSelectMorph}

@@ -37,6 +37,12 @@ export type StudioState = {
    *  bone/morph — selecting either clears this, and selecting a material
    *  clears bone/morph. Does not belong to the clip — not in undo history. */
   selectedMaterial: string | null
+  /** Whether the viewport gizmo is currently shown. Decoupled from
+   *  `selectedBone` so the user can hide the gizmo during playback (dblclick
+   *  empty viewport) without losing inspector/bone-list context. Any
+   *  `setSelectedBone` call re-shows the gizmo, including re-selecting the
+   *  same bone — so the user never gets stuck with a hidden gizmo. */
+  gizmoVisible: boolean
   selectedKeyframes: SelectedKeyframe[]
   /** Immutable clone of `clip` taken at the last commit / undo / redo. Lets
    *  us push a *clean* snapshot onto history even though slider preview
@@ -58,6 +64,7 @@ export type StudioActions = {
   setSelectedBone: Dispatch<SetStateAction<string | null>>
   setSelectedMorph: Dispatch<SetStateAction<string | null>>
   setSelectedMaterial: Dispatch<SetStateAction<string | null>>
+  setGizmoVisible: Dispatch<SetStateAction<boolean>>
   setSelectedKeyframes: StudioKeyframesSetter
   undo: () => void
   redo: () => void
@@ -69,6 +76,7 @@ const INITIAL_STATE: StudioState = {
   selectedBone: null,
   selectedMorph: null,
   selectedMaterial: null,
+  gizmoVisible: true,
   selectedKeyframes: [],
   clipSnapshot: null,
   past: [],
@@ -161,9 +169,20 @@ function createStudioStore(): StudioStore {
       })
     },
     setClipDisplayName: (name) => update("clipDisplayName", name),
-    setSelectedBone: (payload) => update("selectedBone", payload),
+    // Every bone-select event (even re-selecting the same bone) re-shows the
+    // gizmo, so a user who dblclick-empty'd to hide it can bring it back by
+    // clicking the already-highlighted bone in the list. Otherwise the set
+    // bails at the Object.is equality guard in `update()` and the mirror
+    // effect in EngineBridge never re-runs.
+    setSelectedBone: (payload) => {
+      const next = resolve(payload, state.selectedBone)
+      const nextGizmoVisible = next != null ? true : state.gizmoVisible
+      if (next === state.selectedBone && nextGizmoVisible === state.gizmoVisible) return
+      set({ ...state, selectedBone: next, gizmoVisible: nextGizmoVisible })
+    },
     setSelectedMorph: (payload) => update("selectedMorph", payload),
     setSelectedMaterial: (payload) => update("selectedMaterial", payload),
+    setGizmoVisible: (payload) => update("gizmoVisible", payload),
     setSelectedKeyframes: (payload) => update("selectedKeyframes", payload),
     undo: () => {
       if (state.past.length === 0) return

@@ -53,6 +53,9 @@ interface EngineBridgeProps {
    *  EngineBridge needs this to push selectedBone / selectedMaterial to the
    *  right model (the engine keys selection state per model name). */
   loadedModelNameRef: RefObject<string>
+  /** Parent's imperative "scroll the bone list to this bone" hook. Called on
+   *  raycast hit so a bone picked in the viewport auto-centers in the list. */
+  revealBoneInListRef: RefObject<((bone: string) => void) | null>
   currentFrameRef: RefObject<number>
   playheadDrawRef: RefObject<((frame: number) => void) | null>
   documentDirtyRef: RefObject<boolean>
@@ -70,6 +73,7 @@ export function EngineBridge({
   engineRef,
   modelRef,
   loadedModelNameRef,
+  revealBoneInListRef,
   currentFrameRef,
   playheadDrawRef,
   documentDirtyRef,
@@ -84,6 +88,7 @@ export function EngineBridge({
   const clip = useStudioSelector((s) => s.clip)
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMaterial = useStudioSelector((s) => s.selectedMaterial)
+  const gizmoVisible = useStudioSelector((s) => s.gizmoVisible)
   const {
     commit,
     replaceClip,
@@ -91,6 +96,7 @@ export function EngineBridge({
     setSelectedBone,
     setSelectedMorph,
     setSelectedMaterial,
+    setGizmoVisible,
     setSelectedKeyframes,
   } = useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
@@ -158,18 +164,26 @@ export function EngineBridge({
   const handleRaycast = useCallback(
     (modelName: string, _material: string | null, bone: string | null, _screenX: number, _screenY: number) => {
       if (!modelName) {
-        // Miss — keep current selection (common accidental dblclick on empty).
+        // Miss (dblclick on empty space) → hide the gizmo in the viewport
+        // without touching studio selection. Bone-list highlight, Properties
+        // inspector, and timeline state all stay intact — the flag is the
+        // only thing that changes, and re-selecting the bone brings it back.
+        setGizmoVisible(false)
         return
       }
-      // Hit → select bone. Mirrors `handleSelectBone` in studio.tsx so the
+      // Hit → select the bone. Mirrors `handleSelectBone` in studio.tsx so the
       // mutual-exclusion contract holds whether picks come from viewport or
       // from the bone list.
       setSelectedBone(bone)
       setSelectedMorph(null)
       setSelectedMaterial(null)
       setSelectedKeyframes([])
+      // Scroll the bone list so the pick lands in view. Only for raycasts —
+      // bone-list clicks don't need this (the row is already where the user
+      // pointed).
+      if (bone) revealBoneInListRef.current?.(bone)
     },
-    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
+    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setGizmoVisible, setSelectedKeyframes, revealBoneInListRef],
   )
 
   // ─── Gizmo drag → keyframe edit (undoable) ──────────────────────────
@@ -256,8 +270,8 @@ export function EngineBridge({
   useEffect(() => {
     const engine = engineRef.current
     if (!engine) return
-    engine.setSelectedBone(loadedModelNameRef.current, selectedBone)
-  }, [selectedBone, engineRef, loadedModelNameRef])
+    engine.setSelectedBone(loadedModelNameRef.current, gizmoVisible ? selectedBone : null)
+  }, [selectedBone, gizmoVisible, engineRef, loadedModelNameRef])
 
   useEffect(() => {
     const engine = engineRef.current
