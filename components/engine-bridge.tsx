@@ -17,10 +17,12 @@ import {
   type SetStateAction,
 } from "react"
 import { Engine, Model, Vec3 } from "reze-engine"
+import type { AnimationClip, GizmoDragEvent } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
-import { usePlayback } from "@/context/playback-context"
+import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import { useStudioStatusActions } from "@/components/studio-status"
 import { autoClassifyMaterials } from "@/lib/materials"
+import { interpolationTemplateForFrame, readLocalPoseAfterSeek } from "@/lib/utils"
 
 // ─── Constants shared with StudioPage file handlers ──────────────────────
 export const MODEL_PATH = "/models/塞尔凯特/塞尔凯特.pmx"
@@ -47,6 +49,10 @@ interface EngineBridgeProps {
   canvasRef: RefObject<HTMLCanvasElement | null>
   engineRef: RefObject<Engine | null>
   modelRef: RefObject<Model | null>
+  /** Current engine model key — "reze" at boot, replaced on PMX folder upload.
+   *  EngineBridge needs this to push selectedBone / selectedMaterial to the
+   *  right model (the engine keys selection state per model name). */
+  loadedModelNameRef: RefObject<string>
   currentFrameRef: RefObject<number>
   playheadDrawRef: RefObject<((frame: number) => void) | null>
   documentDirtyRef: RefObject<boolean>
@@ -63,6 +69,7 @@ export function EngineBridge({
   canvasRef,
   engineRef,
   modelRef,
+  loadedModelNameRef,
   currentFrameRef,
   playheadDrawRef,
   documentDirtyRef,
@@ -75,10 +82,33 @@ export function EngineBridge({
   setStudioReady,
 }: EngineBridgeProps) {
   const clip = useStudioSelector((s) => s.clip)
-  const { replaceClip, setClipDisplayName, setSelectedMorph } = useStudioActions()
+  const selectedBone = useStudioSelector((s) => s.selectedBone)
+  const selectedMaterial = useStudioSelector((s) => s.selectedMaterial)
+  const {
+    commit,
+    replaceClip,
+    setClipDisplayName,
+    setSelectedBone,
+    setSelectedMorph,
+    setSelectedMaterial,
+    setSelectedKeyframes,
+  } = useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
+  const playbackFrameRef = usePlaybackFrameRef()
   const { setPmxFileName: setStatusPmxFileName, setFps: setStatusFps } = useStudioStatusActions()
   const frameCount = clip?.frameCount ?? 0
+
+  // ─── Refs for the engine-supplied callbacks ──────────────────────────
+  //     The Engine constructor takes `onRaycast` / `onGizmoDrag` once at
+  //     startup and there's no setter — so we hand it stable thunks that
+  //     read the latest handler from a ref. The handlers themselves close
+  //     over refs (clipRef, playbackFrameRef, modelRef) so they always see
+  //     current values without needing re-registration.
+  const clipRef = useRef<AnimationClip | null>(clip)
+  useEffect(() => {
+    clipRef.current = clip
+  }, [clip])
+  const dragDirtyRef = useRef(false)
 
   const playRef = useRef(false)
   const lastFpsRef = useRef<number | null>(null)
@@ -120,6 +150,121 @@ export function EngineBridge({
     }
   }, [])
 
+  // ─── Viewport raycast (dblclick on model) ───────────────────────────
+  //     Engine resolves bone + material for the hit triangle; studio only
+  //     consumes the bone (material lives in the panel, per UX rule:
+  //     "material picks happen in the material list, not the viewport").
+  //     Null modelName means the click missed the mesh — deselect.
+  const handleRaycast = useCallback(
+    (modelName: string, _material: string | null, bone: string | null, _screenX: number, _screenY: number) => {
+      if (!modelName) {
+        // Miss — keep current selection (common accidental dblclick on empty).
+        return
+      }
+      // Hit → select bone. Mirrors `handleSelectBone` in studio.tsx so the
+      // mutual-exclusion contract holds whether picks come from viewport or
+      // from the bone list.
+      setSelectedBone(bone)
+      setSelectedMorph(null)
+      setSelectedMaterial(null)
+      setSelectedKeyframes([])
+    },
+    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
+  )
+
+  // ─── Gizmo drag → keyframe edit (undoable) ──────────────────────────
+  //     Mirrors the preview/commit pattern in properties-inspector.tsx:
+  //     mutate the keyframe in place during drag moves (no React churn),
+  //     commit a new clip ref on drag end so history records one entry
+  //     per gesture. `dragDirtyRef` suppresses the commit for no-op drags
+  //     (gizmo click without movement).
+  const handleGizmoDrag = useCallback(
+    (e: GizmoDragEvent) => {
+      const model = modelRef.current
+      const clip = clipRef.current
+      if (!model || !clip) return
+
+      if (e.phase === "start") {
+        dragDirtyRef.current = false
+        // Sidebar + Properties should track whatever the user is dragging.
+        // Same mutual-exclusion contract as a raycast pick.
+        setSelectedBone(e.boneName)
+        setSelectedMorph(null)
+        setSelectedMaterial(null)
+        setSelectedKeyframes([])
+        return
+      }
+
+      const frame = Math.round(Math.max(0, Math.min(clip.frameCount, playbackFrameRef.current)))
+      const bone = e.boneName
+      const track = clip.boneTracks.get(bone) ?? []
+      const atKey = track.find((k) => k.frame === frame)
+
+      if (atKey) {
+        if (e.kind === "rotate") atKey.rotation = e.localRotation
+        else atKey.translation = e.localTranslation
+      } else {
+        // No key at this frame yet — pull the untouched channel from the
+        // interpolated pose so the new key preserves whatever's currently
+        // displayed on the channel the user isn't dragging.
+        model.loadClip(STUDIO_ANIM_NAME, clip)
+        model.seek(frame / 30)
+        const pose = readLocalPoseAfterSeek(model, bone)
+        if (!pose) return
+        const rotation = e.kind === "rotate" ? e.localRotation : pose.rotation
+        const translation = e.kind === "translate" ? e.localTranslation : pose.translation
+        if (!clip.boneTracks.has(bone)) clip.boneTracks.set(bone, track)
+        track.push({
+          boneName: bone,
+          frame,
+          rotation,
+          translation,
+          interpolation: interpolationTemplateForFrame(track, frame),
+        })
+        track.sort((a, b) => a.frame - b.frame)
+      }
+
+      model.loadClip(STUDIO_ANIM_NAME, clip)
+      model.seek(frame / 30)
+
+      if (e.phase === "end") {
+        if (dragDirtyRef.current) {
+          commit({ ...clip, boneTracks: new Map(clip.boneTracks) })
+        }
+        dragDirtyRef.current = false
+      } else {
+        dragDirtyRef.current = true
+      }
+    },
+    [commit, modelRef, playbackFrameRef, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
+  )
+
+  // Stable thunks that read the latest handlers via ref — re-registration
+  // would require recreating the Engine.
+  const handleRaycastRef = useRef(handleRaycast)
+  const handleGizmoDragRef = useRef(handleGizmoDrag)
+  useEffect(() => {
+    handleRaycastRef.current = handleRaycast
+  }, [handleRaycast])
+  useEffect(() => {
+    handleGizmoDragRef.current = handleGizmoDrag
+  }, [handleGizmoDrag])
+
+  // ─── Mirror React selection → engine gizmo/outline ──────────────────
+  //     The engine keys selection per model name, so every write uses the
+  //     live `loadedModelNameRef.current` (swaps on PMX folder upload).
+  useEffect(() => {
+    const engine = engineRef.current
+    if (!engine) return
+    engine.setSelectedBone(loadedModelNameRef.current, selectedBone)
+  }, [selectedBone, engineRef, loadedModelNameRef])
+
+  useEffect(() => {
+    const engine = engineRef.current
+    if (!engine) return
+    engine.setSelectedMaterial(loadedModelNameRef.current, selectedMaterial)
+  }, [selectedMaterial, engineRef, loadedModelNameRef])
+
   // ─── Engine init + initial model/VMD load ───────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current
@@ -135,6 +280,9 @@ export function EngineBridge({
             target: new Vec3(0, 11.5, 0),
           },
           bloom: { color: new Vec3(1, 0.1, 0.88) },
+          onRaycast: (modelName, material, bone, screenX, screenY) =>
+            handleRaycastRef.current(modelName, material, bone, screenX, screenY),
+          onGizmoDrag: (event) => handleGizmoDragRef.current(event),
         })
         await engine.init()
         if (disposed) return
@@ -206,7 +354,9 @@ export function EngineBridge({
       setPmxBoneNames(new Set())
       setMorphNames([])
       setMaterialNames([])
+      setSelectedBone(null)
       setSelectedMorph(null)
+      setSelectedMaterial(null)
       setStatusPmxFileName("—")
       setStatusFps(null)
       lastFpsRef.current = null

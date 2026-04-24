@@ -372,9 +372,19 @@ export function StudioPage() {
   const clipDisplayName = useStudioSelector((s) => s.clipDisplayName)
   const selectedBone = useStudioSelector((s) => s.selectedBone)
   const selectedMorph = useStudioSelector((s) => s.selectedMorph)
+  const selectedMaterial = useStudioSelector((s) => s.selectedMaterial)
   const selectedKeyframes = useStudioSelector((s) => s.selectedKeyframes)
-  const { commit, replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes, undo, redo } =
-    useStudioActions()
+  const {
+    commit,
+    replaceClip,
+    setClipDisplayName,
+    setSelectedBone,
+    setSelectedMorph,
+    setSelectedMaterial,
+    setSelectedKeyframes,
+    undo,
+    redo,
+  } = useStudioActions()
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   /** Single source of truth for the live playhead — the playback store owns
    *  this ref. EngineBridge's rAF loop writes the per-frame value into it so
@@ -544,21 +554,39 @@ export function StudioPage() {
   const handleSelectBone = useCallback(
     (b: string) => {
       setSelectedMorph(null)
+      setSelectedMaterial(null)
       setSelectedBone(b)
       setSelectedKeyframes([])
     },
-    [setSelectedBone, setSelectedMorph, setSelectedKeyframes],
+    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
   )
 
   const handleSelectMorph = useCallback(
     (name: string) => {
       setSelectedBone(null)
+      setSelectedMaterial(null)
       setSelectedMorph(name)
       setSelectedKeyframes([])
       setTimelineTab("morph")
     },
-    [setSelectedBone, setSelectedMorph, setSelectedKeyframes],
+    [setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes],
   )
+
+  // Material selection is mutually exclusive with bone/morph. Click the same
+  // row to deselect; clicking blank area in the list calls the same handler.
+  const handleToggleSelectMaterial = useCallback(
+    (name: string) => {
+      setSelectedMaterial((prev) => (prev === name ? null : name))
+      setSelectedBone(null)
+      setSelectedMorph(null)
+      setSelectedKeyframes([])
+    },
+    [setSelectedMaterial, setSelectedBone, setSelectedMorph, setSelectedKeyframes],
+  )
+
+  const handleDeselectMaterial = useCallback(() => {
+    setSelectedMaterial(null)
+  }, [setSelectedMaterial])
 
   useEffect(() => {
     if (selectedBone && !pmxBoneNames.has(selectedBone)) setSelectedBone(null)
@@ -567,6 +595,10 @@ export function StudioPage() {
   useEffect(() => {
     if (selectedMorph && !morphNames.includes(selectedMorph)) setSelectedMorph(null)
   }, [selectedMorph, morphNames, setSelectedMorph])
+
+  useEffect(() => {
+    if (selectedMaterial && !materialNames.includes(selectedMaterial)) setSelectedMaterial(null)
+  }, [selectedMaterial, materialNames, setSelectedMaterial])
 
   useEffect(() => {
     setSelectedKeyframes((prev) => prev.filter((s) => s.type !== "curve" || !s.bone || pmxBoneNames.has(s.bone)))
@@ -808,6 +840,8 @@ export function StudioPage() {
       setStatusPmxFileName(pmxFileName.trim() || `${displayStem}.pmx`)
       setSelectedBone((prev) => (prev && boneSet.has(prev) ? prev : null))
       setSelectedMorph((prev) => (prev && morphSet.has(prev) ? prev : null))
+      const materialSet = new Set(materialNamesList)
+      setSelectedMaterial((prev) => (prev && materialSet.has(prev) ? prev : null))
       setSelectedKeyframes((prev) => prev.filter((s) => s.type !== "curve" || !s.bone || boneSet.has(s.bone)))
 
       const prev = animationSnapshot.clip
@@ -845,7 +879,7 @@ export function StudioPage() {
       else model.pause()
       setEngineError(null)
     },
-    [replaceClip, setSelectedBone, setSelectedMorph, setSelectedKeyframes, setClipDisplayName, setCurrentFrame, setPlaying],
+    [replaceClip, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setClipDisplayName, setCurrentFrame, setPlaying],
   )
 
   const loadPmxFromFolder = useCallback(
@@ -985,13 +1019,14 @@ export function StudioPage() {
     setPlaying(false)
     setSelectedBone(null)
     setSelectedMorph(null)
+    setSelectedMaterial(null)
     setSelectedKeyframes([])
     // Bump after clearing selections so downstream effects don't see stale keyframes.
     setClipVersion((v) => v + 1)
     model.show(STUDIO_ANIM_NAME)
     model.seek(0)
     blurActiveElement()
-  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedKeyframes, setCurrentFrame, setPlaying, blurActiveElement])
+  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setCurrentFrame, setPlaying, blurActiveElement])
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
@@ -999,6 +1034,7 @@ export function StudioPage() {
         canvasRef={canvasRef}
         engineRef={engineRef}
         modelRef={modelRef}
+        loadedModelNameRef={loadedModelNameRef}
         currentFrameRef={currentFrameRef}
         playheadDrawRef={playheadDrawRef}
         documentDirtyRef={documentDirtyRef}
@@ -1079,8 +1115,11 @@ export function StudioPage() {
                 materialNames={materialNames}
                 presets={materialPresets}
                 hiddenMaterials={hiddenMaterials}
+                selectedMaterial={selectedMaterial}
                 onChangePresets={applyMaterialPresets}
                 onChangeVisible={applyMaterialVisible}
+                onToggleSelect={handleToggleSelectMaterial}
+                onDeselect={handleDeselectMaterial}
               />
             </TabsContent>
           </Tabs>

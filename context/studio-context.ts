@@ -33,6 +33,10 @@ export type StudioState = {
   clipDisplayName: string
   selectedBone: string | null
   selectedMorph: string | null
+  /** Engine shows an orange outline on this material. Mutually exclusive with
+   *  bone/morph — selecting either clears this, and selecting a material
+   *  clears bone/morph. Does not belong to the clip — not in undo history. */
+  selectedMaterial: string | null
   selectedKeyframes: SelectedKeyframe[]
   /** Immutable clone of `clip` taken at the last commit / undo / redo. Lets
    *  us push a *clean* snapshot onto history even though slider preview
@@ -53,6 +57,7 @@ export type StudioActions = {
   setClipDisplayName: (name: string) => void
   setSelectedBone: Dispatch<SetStateAction<string | null>>
   setSelectedMorph: Dispatch<SetStateAction<string | null>>
+  setSelectedMaterial: Dispatch<SetStateAction<string | null>>
   setSelectedKeyframes: StudioKeyframesSetter
   undo: () => void
   redo: () => void
@@ -63,6 +68,7 @@ const INITIAL_STATE: StudioState = {
   clipDisplayName: "clip",
   selectedBone: null,
   selectedMorph: null,
+  selectedMaterial: null,
   selectedKeyframes: [],
   clipSnapshot: null,
   past: [],
@@ -157,6 +163,7 @@ function createStudioStore(): StudioStore {
     setClipDisplayName: (name) => update("clipDisplayName", name),
     setSelectedBone: (payload) => update("selectedBone", payload),
     setSelectedMorph: (payload) => update("selectedMorph", payload),
+    setSelectedMaterial: (payload) => update("selectedMaterial", payload),
     setSelectedKeyframes: (payload) => update("selectedKeyframes", payload),
     undo: () => {
       if (state.past.length === 0) return
