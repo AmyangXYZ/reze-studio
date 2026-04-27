@@ -15,6 +15,9 @@ interface MorphListProps {
 export const MorphList = memo(function MorphList({ morphNames, clip, selectedMorph, onSelectMorph }: MorphListProps) {
   return (
     <ScrollArea className="h-full">
+      <div className="px-3 py-1 text-[10.5px] font-medium uppercase leading-tight tracking-widest text-muted-foreground">
+        Morphs
+      </div>
       <div className="py-1">
         {morphNames.length === 0 ? (
           <div className="px-3 py-1.5 text-[11px] text-muted-foreground">No morphs</div>
