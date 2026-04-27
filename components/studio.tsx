@@ -31,6 +31,7 @@ import { MorphList } from "@/components/morph-list"
 import { MaterialList } from "@/components/material-list"
 import { PropertiesInspector } from "@/components/properties-inspector"
 import { Timeline } from "@/components/timeline"
+import { ClipModeProperties, ClipModeTimeline, ClipPanel } from "@/components/clip-mode"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { autoClassifyMaterials } from "@/lib/materials"
@@ -116,6 +117,8 @@ const StudioViewport = memo(
   }),
 )
 
+export type StudioMode = "bone" | "clip"
+
 type StudioLeftPanelProps = {
   vmdInputRef: RefObject<HTMLInputElement | null>
   pmxFolderInputRef: RefObject<HTMLInputElement | null>
@@ -131,6 +134,8 @@ type StudioLeftPanelProps = {
   pmxPickSelected: string
   onPmxPickSelectedChange: (path: string) => void
   onConfirmPmxPick: () => void
+  mode: StudioMode
+  onModeChange: (mode: StudioMode) => void
   modelBones: string[]
   selectedGroup: string
   selectedBone: string | null
@@ -161,6 +166,8 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   pmxPickSelected,
   onPmxPickSelectedChange,
   onConfirmPmxPick,
+  mode,
+  onModeChange,
   modelBones,
   selectedGroup,
   selectedBone,
@@ -333,23 +340,28 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
           ) : null}
         </div>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col">
-        <div className="min-h-0 flex-1 overflow-hidden">
-          <BoneList
-            modelBones={modelBones}
-            clip={clip}
-            selectedGroup={selectedGroup}
-            selectedBone={selectedBone}
-            onSelectGroup={onSelectGroup}
-            onSelectBone={onSelectBone}
-            revealRequest={boneListReveal}
-          />
-        </div>
-        <div className="flex max-h-[196px] shrink-0 flex-col border-t border-border">
-          <div className="shrink-0 px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
-            Morphs
-          </div>
+      <Tabs
+        value={mode}
+        onValueChange={(v) => onModeChange(v as StudioMode)}
+        className="min-h-0 flex-1"
+      >
+        <TabsList className="flex min-h-9 w-full shrink-0 items-center gap-4 border-b border-sidebar-border px-3">
+          <TabsTrigger value="bone">Bone/Morph</TabsTrigger>
+          <TabsTrigger value="clip">Clip</TabsTrigger>
+        </TabsList>
+        <TabsContent value="bone" className="flex flex-col">
           <div className="min-h-0 flex-1 overflow-hidden">
+            <BoneList
+              modelBones={modelBones}
+              clip={clip}
+              selectedGroup={selectedGroup}
+              selectedBone={selectedBone}
+              onSelectGroup={onSelectGroup}
+              onSelectBone={onSelectBone}
+              revealRequest={boneListReveal}
+            />
+          </div>
+          <div className="max-h-[194px] shrink-0 overflow-hidden border-t border-border">
             <MorphList
               morphNames={morphNames}
               clip={clip}
@@ -357,8 +369,11 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
               onSelectMorph={onSelectMorph}
             />
           </div>
-        </div>
-      </div>
+        </TabsContent>
+        <TabsContent value="clip" className="overflow-y-auto [scrollbar-width:thin]">
+          <ClipPanel />
+        </TabsContent>
+      </Tabs>
     </aside>
   )
 })
@@ -442,6 +457,10 @@ export function StudioPage() {
   const [timelineTab, setTimelineTab] = useState("allRot")
   /** Right aside tab: "properties" (selection-bound) vs "materials" (model-bound). */
   const [rightPanelTab, setRightPanelTab] = useState<"properties" | "materials">("properties")
+  /** Editor working mode: "bone" (current per-bone editing) vs "clip" (multi-clip
+   *  arrangement). Controlled by the left-panel tabs; the timeline and the
+   *  Properties tab content branch on this. */
+  const [mode, setMode] = useState<StudioMode>("bone")
 
   /** Folder upload contained multiple `.pmx`; user picks one then clicks Load. */
   const [pmxPickFiles, setPmxPickFiles] = useState<File[] | null>(null)
@@ -1104,6 +1123,8 @@ export function StudioPage() {
           pmxPickSelected={pmxPickSelected}
           onPmxPickSelectedChange={setPmxPickSelected}
           onConfirmPmxPick={onConfirmPmxPick}
+          mode={mode}
+          onModeChange={setMode}
           modelBones={sidebarBones}
           selectedGroup={selectedGroup}
           selectedBone={selectedBone}
@@ -1123,7 +1144,11 @@ export function StudioPage() {
           <StudioViewport ref={canvasRef} engineError={engineError} />
           {/* Timeline with dopesheet + value graph */}
           <div className="h-[220px] shrink-0 border-t border-border">
-            <Timeline visibleBones={visibleBones} clipVersion={clipVersion} tab={timelineTab} setTab={setTimelineTab} playheadDrawRef={playheadDrawRef} />
+            {mode === "clip" ? (
+              <ClipModeTimeline />
+            ) : (
+              <Timeline visibleBones={visibleBones} clipVersion={clipVersion} tab={timelineTab} setTab={setTimelineTab} playheadDrawRef={playheadDrawRef} />
+            )}
           </div>
         </div>
 
@@ -1142,16 +1167,20 @@ export function StudioPage() {
               value="properties"
               className="overflow-y-auto overflow-x-hidden px-3 py-2 text-[11px] [scrollbar-width:thin]"
             >
-              <PropertiesInspector
-                modelRef={modelRef}
-                onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
-                onDeleteSelectedKeyframes={deleteSelectedKeyframes}
-                onSimplifySelectedBoneTrack={simplifySelectedBoneTrack}
-                onClearSelectedBoneTrack={clearSelectedBoneTrack}
-                timelineTab={timelineTab}
-                setTimelineTab={setTimelineTab}
-                clipVersion={clipVersion}
-              />
+              {mode === "clip" ? (
+                <ClipModeProperties />
+              ) : (
+                <PropertiesInspector
+                  modelRef={modelRef}
+                  onInsertKeyframeAtPlayhead={insertKeyframeAtPlayhead}
+                  onDeleteSelectedKeyframes={deleteSelectedKeyframes}
+                  onSimplifySelectedBoneTrack={simplifySelectedBoneTrack}
+                  onClearSelectedBoneTrack={clearSelectedBoneTrack}
+                  timelineTab={timelineTab}
+                  setTimelineTab={setTimelineTab}
+                  clipVersion={clipVersion}
+                />
+              )}
             </TabsContent>
             <TabsContent value="materials" className="overflow-hidden">
               <MaterialList
