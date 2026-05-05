@@ -1,12 +1,12 @@
 # Reze Studio
 
-A browser-native, WebGPU-powered animation curve editor for MMD. Professional timeline, dopesheet, and per-channel Bézier editing — no install, runs on laptop / desktop / iPad, from the same URL.
+A browser-native, WebGPU-powered animation curve editor for MMD, built on [reze-engine](https://github.com/AmyangXYZ/reze-engine). Professional timeline, dopesheet, and per-channel Bézier editing.
 
 **Live:** [reze.studio](https://reze.studio)
 
 ![Screenshot](./screenshot.png)
 
-A modern, web-native take on MMD animation editing — a dedicated timeline and curve editor for hand-keying `.vmd` clips, freed from the Windows-only desktop install. It isn't a full MMD replacement (no MME-style shaders or video export yet) and it isn't trying to be Maya or Blender; it's a focused, cross-platform tool built to do the animation-editing job exceptionally well. Rendering runs directly on the GPU via WebGPU through [reze-engine](https://github.com/AmyangXYZ/reze-engine) (Ammo.js physics, IK), delivering high-frame-rate playback and fluid interaction on anything from an iPad to a gaming laptop.
+A modern, web-native take on MMD animation editing — a dedicated timeline and curve editor for hand-keying `.vmd` clips, freed from the Windows-only desktop install. It isn't a full MMD replacement (no MME-style shaders or video export yet) and it isn't trying to be Maya or Blender; it's a focused, cross-platform tool built to do the animation-editing job exceptionally well. Rendering runs directly on the GPU via WebGPU through [reze-engine](https://github.com/AmyangXYZ/reze-engine) delivering high-frame-rate playback and fluid interaction on anything from an iPad to a gaming laptop.
 
 ## Features
 
@@ -73,7 +73,7 @@ A typical workflow in Reze Studio:
 
 ## Tech stack
 
-- **Engine:** [reze-engine](https://github.com/AmyangXYZ/reze-engine) — WebGPU renderer, Ammo.js physics, IK solver
+- **Engine:** [reze-engine](https://github.com/AmyangXYZ/reze-engine) v0.15 — WebGPU renderer, in-house TypeScript port of Bullet physics, IK solver
 - **Editor:** Next.js 16, React 19, TypeScript, shadcn/ui, Tailwind
 
 ---
@@ -81,8 +81,6 @@ A typical workflow in Reze Studio:
 ## Architecture
 
 Beyond being an MMD editor, this repo is also a study in getting a timeline editor to feel snappy in React. Timeline editors are a stress test for the framework: you have a high-frame-rate playhead, multi-axis drags, thousands of keyframes, and a WebGPU canvas that must never stall — all living under the same tree as a normal React UI. This section documents how Reze Studio gets there.
-
-### TL;DR — React engineering highlights
 
 - **Split external stores.** Document/selection lives in `<Studio>`; transport (playhead, playing) lives in `<Playback>`. Playback ticks at rAF frequency never invalidate the undo/redo target.
 - **`useSyncExternalStore` + selector pattern.** Components subscribe to a single slice (`useStudioSelector(s => s.field)`) and re-render only when that slice changes. Action bags (`useStudioActions()`) are stable and never cause re-renders.
@@ -119,31 +117,6 @@ Beyond being an MMD editor, this repo is also a study in getting a timeline edit
 | Chrome        | local `useState` in `StudioPage` | Menubar, file pick dialog                                                                                   |
 
 > _Transport note:_ the `currentFrameRef` is shared via `usePlaybackFrameRef()`. EngineBridge's rAF loop writes the live playhead straight into `.current` without going through `set()`, so non-subscribing consumers read the live frame without any React work.
-
-### Subscription model
-
-`Studio` (document/selection), `Playback` (transport), and `StudioStatus` (chrome footer) are all external stores backed by `useSyncExternalStore`. Components read via `useStudioSelector(s => s.field)` / `usePlaybackSelector(...)` / `useStudioStatusSelector(...)` so each re-renders only on its own slice, and write via `use*Actions()` which return stable bags that never cause re-renders. Wrapping the store's internal `set()` is also where undo/redo hooks in — `commit()` pushes onto `past`, `replaceClip()` (used by VMD/PMX loads and "New") clears history, and selection changes never touch the undo stack.
-
-### Hot paths — zero React updates while interacting
-
-The three high-frequency interactions (playback, keyframe drag, pose slider drag) all share the same shape: **mutate refs/objects imperatively, repaint the canvas via an imperative handle, and touch React exactly once on release.**
-
-- **Playback** — `<EngineBridge>`'s rAF loop reads the engine clock, writes the live frame into the playback store's `currentFrameRef` (the single ref shared via `usePlaybackFrameRef()`), and calls `playheadDrawRef.current(frame)` — a handle `<TimelineCanvas>` exposes that repaints the playhead overlay directly. No `setCurrentFrame` per tick, so nothing re-renders, but any non-subscribing consumer (inspector pose sample, PMX swap snapshot) still sees the live frame via the ref. Auto-scroll (page-turn when the playhead leaves the viewport) lives in the same imperative path and only touches React at the rare page-turn boundary. On pause, the final frame is flushed to `setCurrentFrame` so the paused view matches what was last painted.
-- **Live pose / morph readout** — `<PropertiesInspector>` samples the selected bone's pose and morph weight in isolated leaf subcomponents. While paused it subscribes to `currentFrame` and re-samples on change; while playing it runs its own small rAF loop reading `modelRef.current`'s `runtimeSkeleton` / `getMorphWeights()` directly, gated by equality so unchanged frames don't reconcile. This keeps the per-frame work out of the parent inspector and out of `<StudioPage>` entirely.
-- **Keyframe drag** — `<Timeline>`'s move callbacks mutate `kf.frame` / channel values / track ordering **in place** and fire `dragRedrawRef.current()`, which bumps an internal drag version used by the static-layer cache invalidation check and redraws the canvas. `selectedKeyframes` entries are mutated in place so highlights follow the drag. On mouseup, a single `commit()` clones the track `Map`s → undo/redo snapshot + one `model.loadClip` via `<EngineBridge>`.
-- **Pose slider drag** — `<PropertiesInspector>`'s `apply*Axis` / `applyMorphWeight` functions run in `"preview"` mode per drag tick: mutate the matching keyframe (or insert one) in place, then `model.loadClip + seek` for the 3D viewport. No `commit()`, so Timeline stays static and the Inspector doesn't reconcile. `<AxisSliderRow>` keeps a local thumb value during the drag so Radix doesn't snap back to the stale controlled prop. On `onValueCommit`, a single clone + `commit()` fires — and only that commit enters undo history, so a drag is one undoable unit rather than hundreds of preview frames.
-
-### Simplify track (keyframe reduction)
-
-MMD's interpolation model makes classic Ramer–Douglas–Peucker awkward: each frame stores a whole-row record, rotation is one quaternion governed by a single bezier shaping a slerp-t (so rotX/rotY/rotZ share a segment, not independent curves), and translation has three independent per-axis beziers. Reze Studio uses a **Schneider-style top-down fit** native to that model rather than dropping keys one at a time:
-
-1. Densely sample the original track at every integer frame across `[first, last]`.
-2. Try to fit one VMD segment over the whole span — four independent beziers (rotation slerp-t + tX/tY/tZ). For each, seed handles from endpoint-velocity matching against the dense samples, then refine with a coarse 5⁴ grid in 127-space + a local 5⁴ pass around the winner.
-3. If max pointwise error ≤ ε (geodesic angle for rotation, per-axis for translation), emit one keyframe and collapse every intermediate key.
-4. Otherwise split at the original key nearest the worst-deviation frame and recurse on both halves.
-5. Adjacent original keys are kept verbatim, including their authored interpolation.
-
-The earlier greedy "drop if tolerated" pass had a subtle failure: dropping a key inherited the surviving key's bezier handles, which were authored for a shorter segment — stretching them across a longer span warped the velocity profile and produced visible jitter even with tight pointwise ε. Custom-fitting per emitted segment removes that. Fixed tolerances `0.5°` / `0.01` units, no user knob. The whole operation lands as one `commit()`, so a simplification is one undo step.
 
 ### Where each piece lives
 
