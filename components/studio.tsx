@@ -14,7 +14,7 @@ import {
 } from "react"
 import Link from "next/link"
 import Image from "next/image"
-import { FilePlus2, FolderOpen, FileMusic, FileDown } from "lucide-react"
+import { FilePlus2, FolderOpen, FileMusic, FileDown, FileUp, FileJson, Import } from "lucide-react"
 import { Engine, Model, Vec3, parsePmxFolderInput, pmxFileAtRelativePath } from "reze-engine"
 import { Button } from "@/components/ui/button"
 import {
@@ -37,6 +37,14 @@ import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
 import { autoClassifyMaterials } from "@/lib/materials"
 import type { AnimationClip, BoneKeyframe, MaterialPresetMap, MorphKeyframe } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
+import {
+  useBakedArrangement,
+  useProjectActions,
+  useProjectSelector,
+  type StudioMode,
+} from "@/context/project-context"
+import { decodeProject, encodeProject, type ProjectSnapshot } from "@/lib/project"
+import { AutosaveBridge } from "@/components/autosave-bridge"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import {
   EngineBridge,
@@ -117,7 +125,11 @@ const StudioViewport = memo(
   }),
 )
 
-export type StudioMode = "bone" | "clip"
+export type { StudioMode }
+
+/** Engine animation slot for parsing an imported VMD without touching the
+ *  studio slot; reused per import so registrations don't accumulate. */
+const IMPORT_TEMP_ANIM_NAME = "__import"
 
 type StudioLeftPanelProps = {
   vmdInputRef: RefObject<HTMLInputElement | null>
@@ -129,6 +141,10 @@ type StudioLeftPanelProps = {
   studioReady: boolean
   resetStudioDocument: () => void
   exportClipVmd: () => void
+  onImportVmd: () => void
+  onImportProject: () => void
+  onExportProject: () => void
+  onActivateClip: (id: string) => void
   pmxPickFiles: File[] | null
   pmxPickPaths: string[]
   pmxPickSelected: string
@@ -161,6 +177,10 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
   studioReady,
   resetStudioDocument,
   exportClipVmd,
+  onImportVmd,
+  onImportProject,
+  onExportProject,
+  onActivateClip,
   pmxPickFiles,
   pmxPickPaths,
   pmxPickSelected,
@@ -234,7 +254,7 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                     onSelect={resetStudioDocument}
                   >
                     <FilePlus2 className="size-3.5" />
-                    New
+                    New Project
                   </MenubarItem>
                   <MenubarSeparator className="my-0.5" />
                   <MenubarItem
@@ -253,7 +273,15 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                     onSelect={() => vmdInputRef.current?.click()}
                   >
                     <FileMusic className="size-3.5" />
-                    Load VMD…
+                    Open VMD…
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady}
+                    onSelect={onImportVmd}
+                  >
+                    <Import className="size-3.5" />
+                    Import VMD to library…
                   </MenubarItem>
                 </MenubarGroup>
                 <MenubarSeparator className="my-0.5" />
@@ -265,6 +293,25 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
                   >
                     <FileDown className="size-3.5" />
                     Export VMD…
+                  </MenubarItem>
+                </MenubarGroup>
+                <MenubarSeparator className="my-0.5" />
+                <MenubarGroup>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady}
+                    onSelect={onImportProject}
+                  >
+                    <FileUp className="size-3.5" />
+                    Import Project…
+                  </MenubarItem>
+                  <MenubarItem
+                    className="gap-2 py-1 pl-2 pr-1.5 text-[11px] text-muted-foreground"
+                    disabled={!studioReady}
+                    onSelect={onExportProject}
+                  >
+                    <FileJson className="size-3.5" />
+                    Export Project…
                   </MenubarItem>
                 </MenubarGroup>
               </MenubarContent>
@@ -370,8 +417,8 @@ const StudioLeftPanel = memo(function StudioLeftPanel({
             />
           </div>
         </TabsContent>
-        <TabsContent value="clip" className="overflow-y-auto [scrollbar-width:thin]">
-          <ClipPanel />
+        <TabsContent value="clip" className="min-h-0 flex-1 overflow-hidden">
+          <ClipPanel onImportVmd={onImportVmd} onActivateClip={onActivateClip} />
         </TabsContent>
       </Tabs>
     </aside>
@@ -400,6 +447,7 @@ export function StudioPage() {
     setSelectedMorph,
     setSelectedMaterial,
     setSelectedKeyframes,
+    setGizmoVisible,
     undo,
     redo,
   } = useStudioActions()
@@ -418,7 +466,6 @@ export function StudioPage() {
   const loadedModelNameRef = useRef("reze")
   /** Folder files from the last pick — kept for multi-PMX selection flow. */
   const pmxFolderFilesRef = useRef<File[] | null>(null)
-  const frameCount = clip?.frameCount ?? 0
   /** PMX skeleton bone names; used to hide VMD tracks that do not exist on the loaded model. */
   const [pmxBoneNames, setPmxBoneNames] = useState<ReadonlySet<string>>(new Set())
   /** PMX bone order (skeleton array) — remainder list after clip bones in the sidebar. */
@@ -457,10 +504,36 @@ export function StudioPage() {
   const [timelineTab, setTimelineTab] = useState("allRot")
   /** Right aside tab: "properties" (selection-bound) vs "materials" (model-bound). */
   const [rightPanelTab, setRightPanelTab] = useState<"properties" | "materials">("properties")
-  /** Editor working mode: "bone" (current per-bone editing) vs "clip" (multi-clip
-   *  arrangement). Controlled by the left-panel tabs; the timeline and the
-   *  Properties tab content branch on this. */
-  const [mode, setMode] = useState<StudioMode>("bone")
+  /** Editor working mode: "bone" (per-bone editing of the active clip) vs
+   *  "clip" (multi-clip arrangement). Lives in the project store so
+   *  EngineBridge can swap the engine clip for the baked arrangement. */
+  const mode = useProjectSelector((s) => s.mode)
+  const projectLibrary = useProjectSelector((s) => s.library)
+  const projectTracks = useProjectSelector((s) => s.tracks)
+  const activeClipId = useProjectSelector((s) => s.activeClipId)
+  const selectedPlacementId = useProjectSelector((s) => s.selectedPlacementId)
+  const projectActions = useProjectActions()
+  /** Flat arrangement clip (clip mode only) — export + transport clamping. */
+  const bakedArrangement = useBakedArrangement()
+
+  const handleModeChange = useCallback(
+    (m: StudioMode) => {
+      projectActions.setMode(m)
+      // The gizmo edits the active clip's keyframes — hide it while arranging.
+      if (m === "clip") setGizmoVisible(false)
+    },
+    [projectActions, setGizmoVisible],
+  )
+
+  /** Keep the active library entry in sync with every studio-store commit so
+   *  baking always reads the latest keyframe edits. No-op when the entry
+   *  already holds this clip reference (loads, seeds, activations). */
+  useEffect(() => {
+    if (clip) projectActions.updateActiveClipData(clip)
+  }, [clip, projectActions])
+
+  /** Transport length: the arrangement in clip mode, the active clip otherwise. */
+  const frameCount = (mode === "clip" && bakedArrangement ? bakedArrangement.frameCount : clip?.frameCount) ?? 0
 
   /** Folder upload contained multiple `.pmx`; user picks one then clicks Load. */
   const [pmxPickFiles, setPmxPickFiles] = useState<File[] | null>(null)
@@ -554,6 +627,15 @@ export function StudioPage() {
       if (e.code === "ArrowRight") setCurrentFrame((p) => Math.min(frameCount, Math.round(p) + 1))
       if (e.code === "Home") setCurrentFrame(0)
       if (e.code === "End") setCurrentFrame(frameCount)
+      if (mode === "clip") {
+        // Arrangement ops have no undo history yet — don't rewind invisible
+        // keyframe edits while the dopesheet is hidden.
+        if ((e.key === "Delete" || e.key === "Backspace") && selectedPlacementId != null) {
+          e.preventDefault()
+          projectActions.deletePlacement(selectedPlacementId)
+        }
+        return
+      }
       // Undo / redo. Cmd on macOS, Ctrl elsewhere. Shift+Z (or Ctrl+Y) is redo.
       if ((e.metaKey || e.ctrlKey) && (e.key === "z" || e.key === "Z")) {
         e.preventDefault()
@@ -566,7 +648,7 @@ export function StudioPage() {
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [frameCount, setCurrentFrame, setPlaying, undo, redo])
+  }, [frameCount, setCurrentFrame, setPlaying, undo, redo, mode, selectedPlacementId, projectActions])
 
   // ─── Bone selection handlers ─────────────────────────────────────────
   const handleSelectGroup = useCallback(
@@ -1039,7 +1121,11 @@ export function StudioPage() {
           suppressClipDirtyRef.current += 1
           replaceClip(c)
           documentDirtyRef.current = false
-          setClipDisplayName(sanitizeClipFilenameBase(fileStem(file.name)))
+          const name = sanitizeClipFilenameBase(fileStem(file.name))
+          setClipDisplayName(name)
+          // "Open" replaces the active library clip's content in place, so
+          // its placements on tracks now play the new motion.
+          projectActions.openClipIntoActive(name, c)
           syncStudioAfterNewClip(model)
         }
       } catch (err) {
@@ -1049,22 +1135,126 @@ export function StudioPage() {
         blurActiveElement()
       }
     },
-    [syncStudioAfterNewClip, replaceClip, setClipDisplayName, blurActiveElement],
+    [syncStudioAfterNewClip, replaceClip, setClipDisplayName, blurActiveElement, projectActions],
   )
+
+  /** Import VMD… — parse through a scratch engine slot and add to the clip
+   *  library without touching the active edit or the timeline. */
+  const importVmdInputRef = useRef<HTMLInputElement>(null)
+  const onPickImportVmdFile = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ""
+      const model = modelRef.current
+      if (!file || !model) return
+      const url = URL.createObjectURL(file)
+      try {
+        await model.loadVmd(IMPORT_TEMP_ANIM_NAME, url)
+        const c = model.getClip(IMPORT_TEMP_ANIM_NAME)
+        if (c) projectActions.importClip(sanitizeClipFilenameBase(fileStem(file.name)), c)
+        // loadVmd may have switched the shown animation — restore the studio slot.
+        model.show(STUDIO_ANIM_NAME)
+        model.seek(Math.max(0, currentFrameRef.current) / 30)
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : String(err))
+      } finally {
+        URL.revokeObjectURL(url)
+        blurActiveElement()
+      }
+    },
+    [projectActions, currentFrameRef, blurActiveElement],
+  )
+
+  /** Library "Edit" action: make a clip the bone-mode editing target. Clears
+   *  undo history (same rule as loading a VMD — history can't span clips). */
+  const activateLibraryClip = useCallback(
+    (id: string) => {
+      const entry = projectLibrary.find((c) => c.id === id)
+      if (!entry) return
+      projectActions.setActiveClip(id)
+      suppressClipDirtyRef.current += 1
+      replaceClip(entry.clip)
+      setClipDisplayName(entry.name)
+      setSelectedKeyframes([])
+      setClipVersion((v) => v + 1)
+      setCurrentFrame((f) => Math.min(f, entry.clip.frameCount))
+      projectActions.setMode("bone")
+    },
+    [projectLibrary, projectActions, replaceClip, setClipDisplayName, setSelectedKeyframes, setCurrentFrame],
+  )
+
+  // ─── Project file import / export (.rsproj JSON) ─────────────────────
+  /** Replace arrangement + active clip from a decoded snapshot — shared by
+   *  Import Project… and the autosave restore. */
+  const applyProjectSnapshot = useCallback(
+    (snapshot: ProjectSnapshot, fallbackName: string) => {
+      projectActions.loadProject(snapshot)
+      const active = snapshot.activeClipId != null
+        ? snapshot.library.find((c) => c.id === snapshot.activeClipId)
+        : undefined
+      suppressClipDirtyRef.current += 1
+      replaceClip(active?.clip ?? emptyStudioClip())
+      setClipDisplayName(active?.name ?? fallbackName)
+      documentDirtyRef.current = false
+      setSelectedKeyframes([])
+      setClipVersion((v) => v + 1)
+      setCurrentFrame(0)
+      setPlaying(false)
+    },
+    [projectActions, replaceClip, setClipDisplayName, setSelectedKeyframes, setCurrentFrame, setPlaying],
+  )
+
+  const projectFileInputRef = useRef<HTMLInputElement>(null)
+  const onPickProjectFile = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ""
+      const model = modelRef.current
+      if (!file || !model) return
+      try {
+        const snapshot = decodeProject(JSON.parse(await file.text()))
+        applyProjectSnapshot(snapshot, sanitizeClipFilenameBase(fileStem(file.name)))
+      } catch (err) {
+        window.alert(err instanceof Error ? err.message : String(err))
+      } finally {
+        blurActiveElement()
+      }
+    },
+    [applyProjectSnapshot, blurActiveElement],
+  )
+
+  const exportProjectFile = useCallback(() => {
+    const encoded = encodeProject({
+      name: sanitizeClipFilenameBase(clipDisplayName) || "project",
+      modelRef: { name: modelRef.current?.name ?? "" },
+      library: projectLibrary,
+      tracks: projectTracks,
+      activeClipId,
+    })
+    downloadBlob(
+      new Blob([JSON.stringify(encoded)], { type: "application/json" }),
+      `${sanitizeClipFilenameBase(clipDisplayName) || "project"}.rsproj`,
+    )
+    documentDirtyRef.current = false
+    blurActiveElement()
+  }, [projectLibrary, projectTracks, activeClipId, clipDisplayName, blurActiveElement])
 
   const exportClipVmd = useCallback(() => {
     const model = modelRef.current
-    if (!model || !clip) return
-    const base = sanitizeClipFilenameBase(clipDisplayName)
+    // Clip mode bakes the whole track arrangement into one flat VMD; bone
+    // mode exports the active clip as before.
+    const source = mode === "clip" && bakedArrangement ? bakedArrangement : clip
+    if (!model || !source) return
+    const base = mode === "clip" ? "arrangement" : sanitizeClipFilenameBase(clipDisplayName)
     try {
-      model.loadClip(STUDIO_ANIM_NAME, clip)
+      model.loadClip(STUDIO_ANIM_NAME, source)
       const buf = model.exportVmd(STUDIO_ANIM_NAME)
       downloadBlob(new Blob([buf], { type: "application/octet-stream" }), `${base}-export.vmd`)
       documentDirtyRef.current = false
     } catch (err) {
       window.alert(err instanceof Error ? err.message : String(err))
     }
-  }, [clip, clipDisplayName])
+  }, [clip, clipDisplayName, mode, bakedArrangement])
 
   const resetStudioDocument = useCallback(() => {
     const model = modelRef.current
@@ -1083,13 +1273,34 @@ export function StudioPage() {
     setSelectedKeyframes([])
     // Bump after clearing selections so downstream effects don't see stale keyframes.
     setClipVersion((v) => v + 1)
+    // Fresh arrangement: empty library except the new active clip, one empty
+    // track (the design's "no placeholder" rule — placing is the user's call).
+    projectActions.resetProject(fresh, "clip")
     model.show(STUDIO_ANIM_NAME)
     model.seek(0)
     blurActiveElement()
-  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setCurrentFrame, setPlaying, blurActiveElement])
+  }, [replaceClip, setClipDisplayName, setSelectedBone, setSelectedMorph, setSelectedMaterial, setSelectedKeyframes, setCurrentFrame, setPlaying, blurActiveElement, projectActions])
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden text-foreground">
+      <input
+        ref={importVmdInputRef}
+        type="file"
+        accept=".vmd"
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden
+        onChange={onPickImportVmdFile}
+      />
+      <input
+        ref={projectFileInputRef}
+        type="file"
+        accept=".rsproj,.json,application/json"
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden
+        onChange={onPickProjectFile}
+      />
       <EngineBridge
         canvasRef={canvasRef}
         engineRef={engineRef}
@@ -1107,6 +1318,7 @@ export function StudioPage() {
         setEngineError={setEngineError}
         setStudioReady={setStudioReady}
       />
+      <AutosaveBridge studioReady={studioReady} applyProjectSnapshot={applyProjectSnapshot} />
       <div className="flex min-h-0 flex-1">
         <StudioLeftPanel
           vmdInputRef={vmdInputRef}
@@ -1118,13 +1330,17 @@ export function StudioPage() {
           studioReady={studioReady}
           resetStudioDocument={resetStudioDocument}
           exportClipVmd={exportClipVmd}
+          onImportVmd={() => importVmdInputRef.current?.click()}
+          onImportProject={() => projectFileInputRef.current?.click()}
+          onExportProject={exportProjectFile}
+          onActivateClip={activateLibraryClip}
           pmxPickFiles={pmxPickFiles}
           pmxPickPaths={pmxPickPaths}
           pmxPickSelected={pmxPickSelected}
           onPmxPickSelectedChange={setPmxPickSelected}
           onConfirmPmxPick={onConfirmPmxPick}
           mode={mode}
-          onModeChange={setMode}
+          onModeChange={handleModeChange}
           modelBones={sidebarBones}
           selectedGroup={selectedGroup}
           selectedBone={selectedBone}
@@ -1145,7 +1361,7 @@ export function StudioPage() {
           {/* Timeline with dopesheet + value graph */}
           <div className="h-[220px] shrink-0 border-t border-border">
             {mode === "clip" ? (
-              <ClipModeTimeline />
+              <ClipModeTimeline playheadDrawRef={playheadDrawRef} />
             ) : (
               <Timeline visibleBones={visibleBones} clipVersion={clipVersion} tab={timelineTab} setTab={setTimelineTab} playheadDrawRef={playheadDrawRef} />
             )}

@@ -19,6 +19,7 @@ import {
 import { Engine, Model, Vec3 } from "reze-engine"
 import type { AnimationClip, GizmoDragEvent } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
+import { useBakedArrangement, useProjectActions, useProjectSelector } from "@/context/project-context"
 import { usePlayback, usePlaybackFrameRef } from "@/context/playback-context"
 import { useStudioStatusActions } from "@/components/studio-status"
 import { autoClassifyMaterials } from "@/lib/materials"
@@ -102,7 +103,22 @@ export function EngineBridge({
   const { currentFrame, setCurrentFrame, playing, setPlaying } = usePlayback()
   const playbackFrameRef = usePlaybackFrameRef()
   const { setPmxFileName: setStatusPmxFileName, setFps: setStatusFps } = useStudioStatusActions()
-  const frameCount = clip?.frameCount ?? 0
+  const { seedLibrary } = useProjectActions()
+
+  // ─── Mode-aware engine clip ──────────────────────────────────────────
+  //     Bone mode: the studio store's clip (the active editing clip).
+  //     Clip mode: the baked track arrangement. Everything below — upload,
+  //     seek, play/pause, end-of-clip, frame clamping — keys off
+  //     `engineClip`, so transport length follows the arrangement
+  //     automatically while bone-mode hot paths stay untouched.
+  const mode = useProjectSelector((s) => s.mode)
+  const baked = useBakedArrangement()
+  const engineClip = mode === "clip" && baked ? baked : clip
+  const modeRef = useRef(mode)
+  useEffect(() => {
+    modeRef.current = mode
+  }, [mode])
+  const frameCount = engineClip?.frameCount ?? 0
 
   // ─── Refs for the engine-supplied callbacks ──────────────────────────
   //     The Engine constructor takes `onRaycast` / `onGizmoDrag` once at
@@ -194,6 +210,8 @@ export function EngineBridge({
   //     (gizmo click without movement).
   const handleGizmoDrag = useCallback(
     (e: GizmoDragEvent) => {
+      // Gizmo edits write keyframes into the active clip — bone-mode only.
+      if (modeRef.current !== "bone") return
       const model = modelRef.current
       const clip = clipRef.current
       if (!model || !clip) return
@@ -341,7 +359,12 @@ export function EngineBridge({
             suppressClipDirtyRef.current += 1
             replaceClip(c)
             documentDirtyRef.current = false
-            setClipDisplayName(sanitizeClipFilenameBase(fileStem(VMD_PATH)))
+            const displayName = sanitizeClipFilenameBase(fileStem(VMD_PATH))
+            setClipDisplayName(displayName)
+            // First-launch default: sample clip in the library, placed on
+            // Track 1, active for bone-mode editing. No-op when the library
+            // is already populated (strict-mode re-init, autosave restore).
+            seedLibrary(displayName, c)
             modelRef.current?.show(STUDIO_ANIM_NAME)
             modelRef.current?.seek(0)
             lastSeekFrameRef.current = 0
@@ -387,30 +410,30 @@ export function EngineBridge({
   //     pause doesn't snap the viewport back to frame 0. ────────────────
   useEffect(() => {
     const model = modelRef.current
-    if (!model || !clip) return
-    model.loadClip(STUDIO_ANIM_NAME, clip)
+    if (!model || !engineClip) return
+    model.loadClip(STUDIO_ANIM_NAME, engineClip)
     const f = Math.max(0, currentFrameRef.current)
     model.seek(f / 30)
     maybeResetPhysicsAfterSeek(f)
-  }, [clip, currentFrameRef, modelRef, maybeResetPhysicsAfterSeek])
+  }, [engineClip, currentFrameRef, modelRef, maybeResetPhysicsAfterSeek])
 
   // ─── Scrub: when paused, React owns the playhead and pushes seeks into
   //     the engine. When playing, the engine owns the playhead; the rAF
   //     loop below reads from it — do NOT seek here. ────────────────────
   useLayoutEffect(() => {
     const model = modelRef.current
-    if (!model || !clip) return
+    if (!model || !engineClip) return
     if (!playing) {
       const f = Math.max(0, currentFrame)
       model.seek(f / 30)
       maybeResetPhysicsAfterSeek(f)
     }
-  }, [currentFrame, clip, playing, modelRef, maybeResetPhysicsAfterSeek])
+  }, [currentFrame, engineClip, playing, modelRef, maybeResetPhysicsAfterSeek])
 
   // ─── Play / pause ───────────────────────────────────────────────────
   useEffect(() => {
     const model = modelRef.current
-    if (!model || !clip) return
+    if (!model || !engineClip) return
     if (playing) {
       // If the user pressed play at the end, rewind to 0 first and mirror.
       let startFrame = currentFrameRef.current
@@ -426,7 +449,7 @@ export function EngineBridge({
     } else {
       model.pause()
     }
-  }, [playing, clip, frameCount, setCurrentFrame, currentFrameRef, modelRef, maybeResetPhysicsAfterSeek])
+  }, [playing, engineClip, frameCount, setCurrentFrame, currentFrameRef, modelRef, maybeResetPhysicsAfterSeek])
 
   // Clamp currentFrame to [0, frameCount] whenever the clip shrinks.
   useEffect(() => {
