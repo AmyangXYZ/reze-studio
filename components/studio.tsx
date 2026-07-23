@@ -34,7 +34,7 @@ import { Timeline } from "@/components/timeline"
 import { ClipModeProperties, ClipModeTimeline, ClipPanel } from "@/components/clip-mode"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { BONE_GROUPS, quatToEuler } from "@/lib/animation"
-import { autoClassifyMaterials } from "@/lib/materials"
+import { autoClassifyMaterials, buildStyleGroups, styleGroupsToPresetMap } from "@/lib/materials"
 import type { AnimationClip, BoneKeyframe, MaterialPresetMap, MorphKeyframe } from "reze-engine"
 import { useStudioActions, useStudioSelector } from "@/context/studio-context"
 import {
@@ -746,26 +746,43 @@ export function StudioPage() {
     setSelectedKeyframes((prev) => prev.filter((s) => s.type !== "curve" || !s.bone || pmxBoneNames.has(s.bone)))
   }, [pmxBoneNames, setSelectedKeyframes])
 
-  // ─── Material preset sync ───────────────────────────────────────────
-  //     Whenever the model's material list changes (boot, PMX upload),
-  //     auto-classify via keyword heuristic and push the map to the engine.
-  //     EngineBridge also applies presets inline on boot to avoid a one-frame
-  //     default-shader flash — this effect is the React-state mirror.
+  // ─── Material style-group sync ──────────────────────────────────────
+  //     Whenever the model's material list changes (boot, PMX upload), guess
+  //     style groups and push them to the engine. autoStyleGroups applies the
+  //     engine's maintained JP/CN/EN name hints — so an arbitrary standard MMD
+  //     upload auto-styles without our local table having to know its names —
+  //     with our local keyword pass fed in as overrides (explicit wins). We then
+  //     read the installed groups back so the panel Select matches exactly what
+  //     the engine rendered (incl. materials the hints inferred that our local
+  //     pass missed — otherwise a later edit would wipe them). EngineBridge also
+  //     applies groups inline on boot to avoid a one-frame default-shader flash.
   useEffect(() => {
+    setHiddenMaterials(new Set())
     if (materialNames.length === 0) {
       setMaterialPresets({})
-      setHiddenMaterials(new Set())
       return
     }
-    const next = autoClassifyMaterials(materialNames)
-    setMaterialPresets(next)
-    setHiddenMaterials(new Set())
-    engineRef.current?.setMaterialPresets(loadedModelNameRef.current, next)
+    const engine = engineRef.current
+    const modelName = loadedModelNameRef.current
+    // Seed from the local pass immediately so the panel isn't blank while the
+    // engine compiles; the readback below reconciles it with the engine's hints.
+    const local = autoClassifyMaterials(materialNames)
+    setMaterialPresets(local)
+    if (!engine) return
+    let cancelled = false
+    void (async () => {
+      await engine.autoStyleGroups(modelName, local)
+      if (cancelled) return
+      setMaterialPresets(styleGroupsToPresetMap(engine.getStyleGroups(modelName)))
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [materialNames])
 
   const applyMaterialPresets = useCallback((next: MaterialPresetMap) => {
     setMaterialPresets(next)
-    engineRef.current?.setMaterialPresets(loadedModelNameRef.current, next)
+    void engineRef.current?.applyStyleGroups(loadedModelNameRef.current, buildStyleGroups(next))
   }, [])
 
   const applyMaterialVisible = useCallback((materialName: string, visible: boolean) => {

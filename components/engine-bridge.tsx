@@ -332,11 +332,15 @@ export function EngineBridge({
           setStatusPmxFileName(BUNDLED_PMX_FILENAME)
           model.setMorphWeight("抗穿模", 0.5)
 
-          // Keep boot deterministic: classify before the render loop starts so
-          // the first frame uses the correct NPR buckets instead of falling
-          // through to the default Principled BSDF path. StudioPage's materials
-          // effect will mirror the same map into React state (idempotent).
-          engine.setMaterialPresets("reze", autoClassifyMaterials(materialNames))
+          // Keep boot deterministic: guess + compile the style groups before the
+          // render loop starts so the first frame uses the correct NPR graphs
+          // instead of the neutral default. autoStyleGroups applies the engine's
+          // maintained JP/CN/EN name hints, with our local keyword pass as
+          // overrides (explicit wins). StudioPage's materials effect reads the
+          // installed groups back into React state (idempotent). Await so the
+          // graphs are installed before we render.
+          await engine.autoStyleGroups("reze", autoClassifyMaterials(materialNames))
+          if (disposed) return
 
           engine.addGround({ diffuseColor: new Vec3(0.05, 0.04, 0.06) })
         } catch {

@@ -48,7 +48,7 @@ export const MaterialList = memo(function MaterialList({
       <div className="flex shrink-0 items-center gap-2 border-sidebar-border px-4 py-1.5 text-[10px] font-medium tracking-widest text-muted-foreground">
         <EyeIcon className="size-3 shrink-0" aria-label="Visible" />
         <span className="min-w-0 flex-1 truncate">Material</span>
-        <span className="w-28 shrink-0">Shader Preset</span>
+        <span className="w-28 shrink-0">Style Group</span>
       </div>
       {/* Click-on-blank-area deselects — fires only when the click lands on
           the flex container itself (empty space below the last row), not on

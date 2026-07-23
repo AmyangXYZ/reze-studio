@@ -1,7 +1,18 @@
-import type { MaterialPreset, MaterialPresetMap } from "reze-engine"
+import type { AlphaMode, MaterialPreset, MaterialPresetMap, RenderClass, ShaderGraph, StyleGroup } from "reze-engine"
+import {
+  BODY_GRAPH,
+  CLOTH_ROUGH_GRAPH,
+  CLOTH_SMOOTH_GRAPH,
+  EYE_GRAPH,
+  FACE_GRAPH,
+  HAIR_GRAPH,
+  METAL_GRAPH,
+  STOCKINGS_GRAPH,
+} from "reze-engine"
 
-/** Preset order shown in the Materials panel Select. `default` is the fallback
- *  (Principled BSDF in the engine — anything not matched lands here). */
+/** Style-group order shown in the Materials panel Select. `default` is the
+ *  fallback: a material in no group renders the engine's neutral DEFAULT_GRAPH
+ *  (Principled BSDF), so we never emit a group for it. */
 export const MATERIAL_PRESETS: MaterialPreset[] = [
   "default",
   "face",
@@ -117,4 +128,71 @@ export function setMaterialPreset(
     if (!bucket.includes(materialName)) bucket.push(materialName)
   }
   return next
+}
+
+/** Built-in shader graph backing each style category. `default` is intentionally
+ *  absent — ungrouped materials fall through to the engine's neutral DEFAULT_GRAPH. */
+const GRAPH_FOR_PRESET: Record<Exclude<MaterialPreset, "default">, ShaderGraph> = {
+  face: FACE_GRAPH,
+  body: BODY_GRAPH,
+  eye: EYE_GRAPH,
+  hair: HAIR_GRAPH,
+  cloth_smooth: CLOTH_SMOOTH_GRAPH,
+  cloth_rough: CLOTH_ROUGH_GRAPH,
+  stockings: STOCKINGS_GRAPH,
+  metal: METAL_GRAPH,
+}
+
+/** Pass-integration class per category. The graph is pure shading; the render
+ *  class carries the built-in effects (hair's over-eyes stencil, the eye
+ *  see-through stamp). Everything else stays "auto". */
+const RENDER_CLASS_FOR_PRESET: Partial<Record<MaterialPreset, RenderClass>> = {
+  eye: "eye",
+  hair: "hair",
+}
+
+/** Alpha axis (orthogonal to render class). Stockings use Wyman & McGuire
+ *  object-space hashed alpha; everything else is opaque. */
+const ALPHA_MODE_FOR_PRESET: Partial<Record<MaterialPreset, AlphaMode>> = {
+  stockings: "hashed",
+}
+
+/** Convert a category → material-names map into the engine's StyleGroup[] for
+ *  `engine.applyStyleGroups`. One group per non-empty, non-`default` category;
+ *  the category name is the stable group id, backed by its built-in graph plus
+ *  the matching render class + alpha mode. Empty categories and `default` are
+ *  omitted so their materials revert to the neutral ungrouped path. */
+export function buildStyleGroups(map: MaterialPresetMap): StyleGroup[] {
+  const groups: StyleGroup[] = []
+  for (const preset of MATERIAL_PRESETS) {
+    if (preset === "default") continue
+    const materials = map[preset]
+    if (!materials || materials.length === 0) continue
+    groups.push({
+      id: preset,
+      label: MATERIAL_PRESET_LABEL[preset],
+      materials: [...materials],
+      graph: GRAPH_FOR_PRESET[preset],
+      renderClass: RENDER_CLASS_FOR_PRESET[preset] ?? "auto",
+      alphaMode: ALPHA_MODE_FOR_PRESET[preset] ?? "opaque",
+    })
+  }
+  return groups
+}
+
+const KNOWN_PRESETS = new Set<string>(MATERIAL_PRESETS)
+
+/** Reverse of {@link buildStyleGroups}: read the engine's installed StyleGroup[]
+ *  (e.g. what `engine.autoStyleGroups` produced) back into the panel's category
+ *  map, so the Select reflects exactly what's rendering — including groups the
+ *  engine's name hints inferred that our local keyword pass missed. autoStyleGroups
+ *  keys groups by category id, so this is a direct read; any group whose id isn't
+ *  one of our categories (e.g. a future custom group) is ignored. */
+export function styleGroupsToPresetMap(groups: readonly StyleGroup[]): MaterialPresetMap {
+  const map: MaterialPresetMap = {}
+  for (const g of groups) {
+    if (g.id === "default" || !KNOWN_PRESETS.has(g.id) || g.materials.length === 0) continue
+    map[g.id as MaterialPreset] = [...g.materials]
+  }
+  return map
 }
