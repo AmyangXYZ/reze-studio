@@ -59,6 +59,27 @@ export const AUDIO_PATH = `${ASSETS}/audio/Classic.mp3`
 export const STUDIO_ANIM_NAME = "studio"
 export const BUNDLED_PMX_FILENAME = MODEL_PATH.replace(/^.*\//, "") || "model.pmx"
 
+/** sRGB hex → the linear-light Vec3 the engine's colours take. */
+function hexToLinear(hex: string): Vec3 {
+  const n = parseInt(hex.replace("#", ""), 16)
+  const lin = (c: number) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
+  return new Vec3(lin(((n >> 16) & 0xff) / 255), lin(((n >> 8) & 0xff) / 255), lin((n & 0xff) / 255))
+}
+
+/** Azimuth/elevation in degrees → the direction sunlight travels. */
+function sunDirection(azimuth: number, elevation: number): Vec3 {
+  const az = (azimuth * Math.PI) / 180
+  const el = (elevation * Math.PI) / 180
+  return new Vec3(-Math.cos(el) * Math.sin(az), -Math.sin(el), -Math.cos(el) * Math.cos(az))
+}
+
+/** reze-design's demo scene: its world, sun and bloom, dimmed for the dark editor. */
+const LOOK = {
+  world: { color: hexToLinear("#ed6aff"), strength: 0.4 },
+  sun: { color: hexToLinear("#ffffff"), strength: 0.5, direction: sunDirection(205, 21) },
+  bloom: { enabled: true, threshold: 0.7, scatter: 0.8, intensity: 0.6, color: hexToLinear("#ffc9c9") },
+}
+
 // Whether this build ships the demo model and motion (absent = on). Set
 // NEXT_PUBLIC_USE_DEFAULT_ASSETS=false to boot empty; parsed leniently, same
 // convention as reze-design. Read at build time (NEXT_PUBLIC_ inlines it).
@@ -400,13 +421,16 @@ export function EngineBridge({
             distance: 31.5,
             target: new Vec3(0, 11.5, 0),
           },
-          bloom: { color: new Vec3(1, 0.1, 0.88) },
+          ...LOOK,
           onRaycast: (modelName, material, bone, screenX, screenY) =>
             handleRaycastRef.current(modelName, material, bone, screenX, screenY),
           onGizmoDrag: (event) => handleGizmoDragRef.current(event),
         })
         await engine.init()
         if (disposed) return
+        // Engine default (0.0002) drags the scene at ~30% of the cursor; the engine
+        // keeps its Camera private, so the studio sets the field directly.
+        ;(engine as unknown as { camera: { panSensitivity: number } }).camera.panSensitivity = 0.0004
 
         // Stage first: ground up and the render loop painting before any model
         // bytes arrive — the model streams in and reveals styled below.
