@@ -196,6 +196,13 @@ const en = {
     "Right Hand": "Right hand",
     "Lower Body": "Lower body",
   } as Record<string, string>,
+  notice: {
+    title: "This is not the official Reze Studio",
+    body: "This copy was repackaged by a third party. Reze Studio runs only as the web app at reze.studio; wrapped builds are not supported and may be modified or out of date.",
+    source: "The source is open at ",
+    sourceEnd: ".",
+    open: "Open",
+  },
 }
 
 export type Dictionary = typeof en
@@ -370,6 +377,13 @@ const zh: Dictionary = {
     "Left Hand": "左手",
     "Right Hand": "右手",
     "Lower Body": "下半身",
+  },
+  notice: {
+    title: "这不是官方的 Reze Studio",
+    body: "此版本由第三方封装。Reze Studio 只以 reze.studio 网页版的形式提供；封装版不受支持，且可能被篡改或过时。",
+    source: "源码公开于 ",
+    sourceEnd: "。",
+    open: "打开",
   },
 }
 
