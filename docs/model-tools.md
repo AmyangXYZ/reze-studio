@@ -72,6 +72,15 @@ so texture colours that match on paper do not match on screen.
 **The studio caches textures by file name.** A recoloured sheet under its old name shows
 the old colours. `hairmix` puts a hash of the colours in every sheet name.
 
+**Recolour by brightness ratio.** `hairmix.recolor` gives each pixel the ramp colour
+whose brightness stands to the base colour's as the pixel's stands to its sheet's
+median, reading the ramp's brightness curve backwards. Two shortcuts failed first:
+stretching each sheet between its own percentiles amplified a narrow dark sheet ninefold
+(every faint stroke and jagged line edge came out crimson on pink), and placing pixels
+along the ramp by stops flattened a light sheet, because the ramp's brightness barely
+climbs through its red middle. Patching either one (contrast, a knee, a detail boost)
+only moved the symptom.
+
 **Copied materials carry indices into the donor's texture list.** A material's `sph` and
 `toon` must be re-pointed by file, or they land on whatever the host has at that index
 (Makima's braid once wore the host's skin as a sphere map).

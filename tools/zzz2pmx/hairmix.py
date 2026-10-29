@@ -263,27 +263,36 @@ def coverage(m, mat, size):
     return np.asarray(img) > 0
 
 
-def recolor(path, mats, stops, base=0.62, spread=0.9, sheen=None, contrast=None):
-    """The materials' sheets through one colour ramp by luminance, read only where
-    their triangles sample. The first sheet sets the tones: its median lands on `base`
-    of the ramp and its 2nd-98th percentile range spans `spread` -- every sheet's over
-    its own range, so each keeps its strokes. `contrast` then sets how far each one
-    reaches. Matching 塞尔凯特's braid to 英招's flat bangs' distribution flattened its
-    outlines; at full spread her soft lavender shading came out as hard dark blotches.
+def recolor(path, mats, stops, base=0.62, sheen=None):
+    """The materials' sheets dyed through one colour ramp, read only where their
+    triangles sample.
 
-    `contrast` scales one material's range on the ramp (its `spread` times this): 英招's
-    flat cel bangs want more (at 0.9 their strand lines were a middle red beside beach
-    英招's dark ones), 塞尔凯特's braid less.
+    Brightness ratios carry over: a pixel's output colour is the point on the ramp
+    whose brightness stands to the base colour's (the ramp at `base`) as the pixel's
+    stands to its own sheet's median. A stroke 30% darker than the lavender around it
+    comes out 30% darker than the red around it, whatever colour each sheet started as.
+
+    Placing pixels along the ramp by stops instead was faithful only where the ramp's
+    brightness climbs evenly, and it barely climbs through its red middle: 塞尔凯特's
+    braid lost 2.5x of its contrast there and went flat. Stretching each sheet between
+    its own percentiles amplified a narrow one without limit instead: 听风消夏's dark
+    bangs, spanning 0.19-0.35, had every faint stroke and jagged line edge multiplied
+    ninefold, crimson on pink.
 
     `sheen` brightens one material's painted highlight -- the angel ring across the
     bangs -- and nothing else: a mark standing well above the hair around it (a wide
     median of its own sheet), within what the material samples, blends to the given
-    colour. Brightening the ramp's top lifted the whole head with it."""
+    colour, with soft edges and a faint glow."""
     m = PMX(path)
     base_dir = os.path.dirname(path)
     pos = np.array([s_[0] for s_ in stops])
     col = np.array([[int(s_[1][i:i + 2], 16) for i in (1, 3, 5)] for s_ in stops], float)
-    ref = None
+    # the ramp's own brightness curve, to be read backwards
+    ts = np.linspace(0, 1, 2001)
+    ramp = np.stack([np.interp(ts, pos, col[:, k]) for k in range(3)], -1)
+    lum = ramp @ [0.299, 0.587, 0.114] / 255
+    assert np.all(np.diff(lum) > 0), 'the ramp must brighten all the way up'
+    lb = float(np.interp(base, ts, lum))
     for mat in mats:
         x = next(x for x in m.materials if x['name'] == mat)
         sheet = os.path.join(base_dir, m.textures[x['tex']].replace('\\', '/'))
@@ -291,18 +300,14 @@ def recolor(path, mats, stops, base=0.62, spread=0.9, sheen=None, contrast=None)
         alpha = im.getchannel('A') if 'A' in im.getbands() else None
         L = (np.asarray(im.convert('RGB')).astype(float) / 255) @ [0.299, 0.587, 0.114]
         used = coverage(m, mat, im.size)
-        raw = L.copy()
-        k = spread * (contrast or {}).get(mat, 1.0)
-        lo, med, hi = np.percentile(L[used], [2, 50, 98])
-        t = np.clip(base + (L - med) / max(hi - lo, 1e-6) * k, 0, 1)
+        med = np.percentile(L[used], 50)
+        target = np.clip(lb * np.maximum(L, 0.01) / med, lum[0], lum[-1])
+        t = np.interp(target, lum, ts)
         out = np.stack([np.interp(t, pos, col[:, k]) for k in range(3)], -1)
         if sheen and mat in sheen:
             from scipy import ndimage
-            around = ndimage.median_filter(raw, size=31)
-            ring = np.clip((raw - around - 0.08) / 0.08, 0, 1) * used
-            # soft edges and a faint glow round them, so the sheen sits on the hair
-            # instead of being cut out of it; at full strength and hard-edged it read
-            # as pasted on
+            around = ndimage.median_filter(L, size=31)
+            ring = np.clip((L - around - 0.08) / 0.08, 0, 1) * used
             px = im.size[0] / 1024
             ring = np.clip(0.8 * ndimage.gaussian_filter(ring, 1.6 * px)
                            + 0.35 * ndimage.gaussian_filter(ring, 7 * px), 0, 0.85) * used
@@ -313,7 +318,9 @@ def recolor(path, mats, stops, base=0.62, spread=0.9, sheen=None, contrast=None)
         if alpha is not None:
             res.putalpha(alpha)
         res.save(sheet)
-        print(f'  {mat} ({os.path.basename(sheet)}): median on {base} of the ramp')
+        r_lo, r_hi = np.percentile(L[used] / med, [1, 99])
+        print(f'  {mat} ({os.path.basename(sheet)}): brightness {r_lo:.2f}x..{r_hi:.2f}x its median -> '
+              f'ramp {np.interp(lb * r_lo, lum, ts):.2f}..{np.interp(min(lb * r_hi, lum[-1]), lum, ts):.2f}')
 
 
 HF = re.compile(r'^hf_')
@@ -338,7 +345,6 @@ MIXES = {
         recolor=['hair_front', 'hair_braid'],
         ramp=MAKIMA_RED,
         sheen={'hair_front': '#ffd0c8'},
-        contrast={'hair_front': 1.65, 'hair_braid': 0.6},
         iris=[('', '眼睛')],
     ),
 }
@@ -350,7 +356,7 @@ def main(name, out_dir=None):
     s = MIXES[name]
     # The studio caches a texture by its file name: a sheet whose colours change keeps
     # the old ones on screen under the same name, so each name carries its colours' hash
-    tag = hashlib.md5(repr((s.get('ramp'), s.get('sheen'), s.get('contrast'), iris_mod.RINGS, iris_mod.GOLD, 'own-range-scaled')).encode()).hexdigest()[:6]
+    tag = hashlib.md5(repr((s.get('ramp'), s.get('sheen'), iris_mod.RINGS, iris_mod.GOLD, 'ratio')).encode()).hexdigest()[:6]
     for p in s['pieces']:
         stem, ext = os.path.splitext(p['sheet'])
         p['sheet'] = f'{stem}_{tag}{ext}'
@@ -400,7 +406,7 @@ def main(name, out_dir=None):
             append(build, donor, p['name'], fit, p['sheet'])
             shutil.rmtree(ddir)
     with progress.step('red'):
-        recolor(build, s['recolor'], s['ramp'], sheen=s.get('sheen'), contrast=s.get('contrast'))
+        recolor(build, s['recolor'], s['ramp'], sheen=s.get('sheen'))
     # a model per variant, side by side to compare
     variants = s.get('iris') or [('', None)]
     for suffix, mat in variants:
