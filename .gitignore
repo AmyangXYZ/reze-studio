@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# the models -- large binaries, kept beside the repo rather than in it
+/public/models/*
+/backups/
+
+# python
+__pycache__/
