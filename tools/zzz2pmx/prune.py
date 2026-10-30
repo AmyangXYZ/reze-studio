@@ -45,12 +45,18 @@ def prune(m, force=()):
     display tail pointed at one keeps the direction as an offset instead, and their
     bodies and joints go with them."""
     nb = len(m.bones)
+    # Only a vertex some face draws keeps a bone. A dropped material leaves its
+    # vertices behind, weighted as they were: 大梵天's hair, taken off for Makima's,
+    # left 7014 of them, and they held two bodies of its old hair rig alive -- jointless
+    # once the rest of the chain went, falling from the first frame.
+    drawn = np.zeros(len(m.vertices), bool)
+    drawn[np.asarray(m.faces, int)] = True
     force = {i for i, b in enumerate(m.bones) if b['name'] in force and b['name'] not in KEEP}
     if force:
         # never a bone something live hangs from: the weapon's chain had no live
         # descendants, センター has the whole skeleton
         weighted = set()
-        for v in m.vertices:
+        for v in (v for v, d in zip(m.vertices, drawn) if d):
             for b, w in zip(v[5], v[6]):
                 if w > 1e-6:
                     weighted.add(int(b))
@@ -107,7 +113,7 @@ def prune(m, force=()):
             v[6] = [w / tot for _, w in top] + [0.0] * (4 - len(top))
             m.vertices[n] = tuple(v[:8])
     live = np.array([b['name'] in KEEP and i not in force for i, b in enumerate(m.bones)])
-    for v in m.vertices:
+    for v in (v for v, d in zip(m.vertices, drawn) if d):
         for b, w in zip(v[5], v[6]):
             if w > 1e-6 and 0 <= b < nb and b not in force:
                 live[b] = True

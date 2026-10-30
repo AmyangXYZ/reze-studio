@@ -263,14 +263,30 @@ def coverage(m, mat, size):
     return np.asarray(img) > 0
 
 
-def recolor(path, mats, stops, base=0.62, sheen=None):
+def clean(L):
+    """A sheet's brightness without its brushwork mottle: an edge-preserving blur that
+    keeps the line art and the shadow bands but takes out the faint swirls between them.
+
+    听风消夏's bangs are painted dark grey, all their shading within 0.22-0.33; dyed up to
+    red, swirls a hundredth apart in brightness came out as dirty blotches and contour
+    rings. Two light bilateral passes (range 0.02, radius 4) flatten them; stronger
+    ones start to soften the strokes."""
+    import cv2
+    x = L.astype(np.float32)
+    for _ in range(2):
+        x = cv2.bilateralFilter(x, -1, 0.02, 4)
+    return x.astype(float)
+
+
+def recolor(path, mats, stops, median, sheen=None, smooth=(), gate=0.15, detail=None):
     """The materials' sheets dyed through one colour ramp, read only where their
     triangles sample.
 
-    Brightness ratios carry over: a pixel's output colour is the point on the ramp
-    whose brightness stands to the base colour's (the ramp at `base`) as the pixel's
-    stands to its own sheet's median. A stroke 30% darker than the lavender around it
-    comes out 30% darker than the red around it, whatever colour each sheet started as.
+    Brightness ratios carry over: each pixel's colour is the point on the ramp whose
+    brightness stands to one common colour's as the pixel's stands to its own sheet's
+    median, so a stroke 30% darker than the lavender around it comes out 30% darker
+    than the red around it, and every sheet's median lands on the same colour,
+    `median` -- the two pieces match.
 
     Placing pixels along the ramp by stops instead was faithful only where the ramp's
     brightness climbs evenly, and it barely climbs through its red middle: 塞尔凯特's
@@ -278,6 +294,30 @@ def recolor(path, mats, stops, base=0.62, sheen=None):
     its own percentiles amplified a narrow one without limit instead: 听风消夏's dark
     bangs, spanning 0.19-0.35, had every faint stroke and jagged line edge multiplied
     ninefold, crimson on pink.
+
+    Nothing is dyed under the studio's `gate`. Its hair shader (reze-engine
+    graph/presets/hair.ts, node `gate`) adds a 0.1 glow wherever the texture's BT.601
+    value, sampled as sRGB so in linear light, exceeds 0.15 -- a hard step. 塞尔凯特's
+    lavender sits at 0.30, glowing evenly all over; a deep red sits at the step itself,
+    and its painted shading flipped across it in ragged blood-dark patches that
+    followed the paint. So the median is a colour well over it (Tailwind's red-500,
+    0.30), and the shade runs down by ratio to the first ramp colour that clears the
+    gate by a tenth; a sheet whose darkest hundredth would pass that floor has its shade
+    laid linearly into the band instead, every stroke kept in place. With a median
+    just over the gate the band was too narrow to show (flat); dyed wholly under it the
+    hair came out too dark; taking the strand outlines out and softening the shade by a
+    power were earlier guesses at the patches, and only lost detail.
+
+    `detail` multiplies a sheet's fine structure -- its brightness over a blur of
+    twelve texels per 2048, in log -- and leaves its broad shading alone. 塞尔凯特
+    paints the braid's strand texture half in colour, pink streaks in blue-lavender;
+    one hue cannot carry that, and a ratio of brightness reads as a smaller step of
+    lightness in red than in lavender: dyed, its fine detail was half as strong (L*
+    1.7 against 3.2) and the braid read flat in the studio.
+
+    Everything the triangles do not sample then takes the nearest colour they do:
+    filtering and mipmaps blend in texels from past an island's edge, and the filler
+    there -- 塞尔凯特's navy, dyed -- came out as dark specks along the strands.
 
     `sheen` brightens one material's painted highlight -- the angel ring across the
     bangs -- and nothing else: a mark standing well above the hair around it (a wide
@@ -292,35 +332,64 @@ def recolor(path, mats, stops, base=0.62, sheen=None):
     ramp = np.stack([np.interp(ts, pos, col[:, k]) for k in range(3)], -1)
     lum = ramp @ [0.299, 0.587, 0.114] / 255
     assert np.all(np.diff(lum) > 0), 'the ramp must brighten all the way up'
-    lb = float(np.interp(base, ts, lum))
+    lin = np.where(ramp / 255 <= 0.04045, ramp / 255 / 12.92, ((ramp / 255 + 0.055) / 1.055) ** 2.4)
+    t_floor = ts[np.flatnonzero(lin @ [0.299, 0.587, 0.114] > gate * 1.1)[0]]
+    lf = float(np.interp(t_floor, ts, lum))
+    lm = float(np.array([int(median[i:i + 2], 16) for i in (1, 3, 5)]) @ [0.299, 0.587, 0.114] / 255)
+    assert lm > lf, 'the median colour sits under the gate'
+    sheets = {}
     for mat in mats:
         x = next(x for x in m.materials if x['name'] == mat)
         sheet = os.path.join(base_dir, m.textures[x['tex']].replace('\\', '/'))
         im = Image.open(sheet)
-        alpha = im.getchannel('A') if 'A' in im.getbands() else None
         L = (np.asarray(im.convert('RGB')).astype(float) / 255) @ [0.299, 0.587, 0.114]
+        if mat in smooth:
+            L = clean(L)
         used = coverage(m, mat, im.size)
-        med = np.percentile(L[used], 50)
-        target = np.clip(lb * np.maximum(L, 0.01) / med, lum[0], lum[-1])
+        sheets[mat] = (sheet, im, L, used, np.percentile(L[used], 50))
+    print(f'  the hair shader gate ({gate}) puts the floor at ramp {t_floor:.2f}; every median '
+          f'at {median} (ramp {np.interp(lm, lum, ts):.2f}), {lm / lf:.2f}x over the floor')
+    for mat in mats:
+        sheet, im, L, used, med = sheets[mat]
+        alpha = im.getchannel('A') if 'A' in im.getbands() else None
+        r = np.maximum(L, 0.01) / med
+        if detail and mat in detail:
+            import cv2
+            lr = np.log(r).astype(np.float32)
+            low = cv2.GaussianBlur(lr, (0, 0), 12 * im.size[0] / 2048)
+            r = np.exp(low + detail[mat] * (lr - low))
+        r_lo = np.percentile(r[used], 1)
+        if lm * r_lo >= lf:
+            shade = lm * r
+        else:
+            shade = lf + (lm - lf) * np.clip((r - r_lo) / (1 - r_lo), 0, 1)
+        target = np.clip(np.where(r < 1, shade, lm * r), lf, lum[-1])
         t = np.interp(target, lum, ts)
         out = np.stack([np.interp(t, pos, col[:, k]) for k in range(3)], -1)
         if sheen and mat in sheen:
+            import cv2
             from scipy import ndimage
-            around = ndimage.median_filter(L, size=31)
-            ring = np.clip((L - around - 0.08) / 0.08, 0, 1) * used
             px = im.size[0] / 1024
+            # the window wider than any mark: at 31 pixels a highlight wider than half of
+            # it was its own median, and its middle came out unlit, a dark blot in the sheen
+            win = int(81 * px) | 1
+            around = cv2.medianBlur((np.clip(L, 0, 1) * 255).round().astype(np.uint8), win) / 255
+            ring = np.clip((L - around - 0.08) / 0.08, 0, 1) * used
             ring = np.clip(0.8 * ndimage.gaussian_filter(ring, 1.6 * px)
                            + 0.35 * ndimage.gaussian_filter(ring, 7 * px), 0, 0.85) * used
             c_ = np.array([int(sheen[mat][i:i + 2], 16) for i in (1, 3, 5)], float)
             out = out * (1 - ring[..., None]) + c_ * ring[..., None]
             print(f'  {mat}: {int((ring > 0.5).sum())} pixels of painted highlight to {sheen[mat]}')
+        from scipy import ndimage
+        _, (iy, ix) = ndimage.distance_transform_edt(~used, return_indices=True)
+        out = out[iy, ix]
         res = Image.fromarray(out.round().astype(np.uint8))
         if alpha is not None:
             res.putalpha(alpha)
         res.save(sheet)
-        r_lo, r_hi = np.percentile(L[used] / med, [1, 99])
-        print(f'  {mat} ({os.path.basename(sheet)}): brightness {r_lo:.2f}x..{r_hi:.2f}x its median -> '
-              f'ramp {np.interp(lb * r_lo, lum, ts):.2f}..{np.interp(min(lb * r_hi, lum[-1]), lum, ts):.2f}')
+        q = np.percentile(t[used], [1, 50, 99])
+        print(f'  {mat} ({os.path.basename(sheet)}): ramp {q[0]:.2f} / {q[1]:.2f} / {q[2]:.2f} '
+              f'(1st / median / 99th), shade {"by ratio" if lm * r_lo >= lf else f"laid into {lm / lf:.2f}x of {1 / r_lo:.2f}x"}')
 
 
 HF = re.compile(r'^hf_')
@@ -328,7 +397,13 @@ HF = re.compile(r'^hf_')
 # Makima's hair, shadow to highlight: a red kept off orange -- the studio's hair shading
 # warms what it is given, and #c8443a at the middle read brown-orange there -- with a
 # sheen that stays pink, as a near-white top washed the crown out.
-MAKIMA_RED = [(0.0, '#4a1219'), (0.35, '#a02a32'), (0.7, '#cf4a52'), (0.88, '#e86a70'), (1.0, '#f8908f')]
+# Then redder: the same hue, saturation 0.66 -> 0.81 at the base, as the first read pink.
+# Then Tailwind's reds, the median at red-500: the deep reds read too dark in the
+# studio, and a red under the hair shader's gate cannot be a bright one. v4's scale,
+# 800 to 300 (its 900 is brighter than its 800): v3's red-500 (#ef4444) read pink,
+# and v4's purer 600-700 also leave the shade more room over the gate (1.75x, from 1.53x).
+MAKIMA_RED = [(0.0, '#9f0712'), (0.2, '#c10007'), (0.4, '#e7000b'), (0.6, '#fb2c36'),
+              (0.8, '#ff6467'), (1.0, '#ffa2a2')]
 
 MIXES = {
     'makima': dict(
@@ -339,24 +414,32 @@ MIXES = {
             # straw hat, and stays behind)
             dict(src=M + '巡天·英招-听风消夏/英招泳装.pmx', mat='hair', name='hair_front', sheet='hair_front.png',
                  keep=lambda tops: sum(b.startswith('hair_B') for b in tops) < 0.05 * len(tops)),
-            dict(src=M + '塞尔凯特2.0 2/塞尔凯特3.0.pmx', mat='头发', name='hair_braid', sheet='hair_braid.png',
+            dict(src=M + '塞尔凯特2.0/塞尔凯特3.0.pmx', mat='头发', name='hair_braid', sheet='hair_braid.png',
                  keep=lambda tops: sum(bool(HF.match(b)) for b in tops) >= 0.05 * len(tops)),
         ],
         recolor=['hair_front', 'hair_braid'],
         ramp=MAKIMA_RED,
+        median='#fb2c36',
+        detail={'hair_braid': 3.4},
         sheen={'hair_front': '#ffd0c8'},
+        smooth=['hair_front'],
         iris=[('', '眼睛')],
     ),
 }
 
 
-def main(name, out_dir=None):
+def _tag(s):
+    """The studio caches a texture by its file name: a sheet whose colours change keeps
+    the old ones on screen under the same name, so each name carries its colours' hash."""
     import hashlib
     import iris as iris_mod
+    return hashlib.md5(repr((s.get('ramp'), s.get('sheen'), iris_mod.RINGS, iris_mod.GOLD, 'ratio', 'sheen81', 'pad', 'gate0.15', 'over',
+                             s.get('smooth'), s.get('median'), s.get('detail'))).encode()).hexdigest()[:6]
+
+
+def main(name, out_dir=None):
     s = MIXES[name]
-    # The studio caches a texture by its file name: a sheet whose colours change keeps
-    # the old ones on screen under the same name, so each name carries its colours' hash
-    tag = hashlib.md5(repr((s.get('ramp'), s.get('sheen'), iris_mod.RINGS, iris_mod.GOLD, 'ratio')).encode()).hexdigest()[:6]
+    tag = _tag(s)
     for p in s['pieces']:
         stem, ext = os.path.splitext(p['sheet'])
         p['sheet'] = f'{stem}_{tag}{ext}'
@@ -406,7 +489,7 @@ def main(name, out_dir=None):
             append(build, donor, p['name'], fit, p['sheet'])
             shutil.rmtree(ddir)
     with progress.step('red'):
-        recolor(build, s['recolor'], s['ramp'], sheen=s.get('sheen'))
+        recolor(build, s['recolor'], s['ramp'], s['median'], sheen=s.get('sheen'), smooth=s.get('smooth', ()), detail=s.get('detail'))
     # a model per variant, side by side to compare
     variants = s.get('iris') or [('', None)]
     for suffix, mat in variants:
@@ -427,5 +510,43 @@ def main(name, out_dir=None):
               f'{len(m.bones)} bones, {len(m.rigids)} rigid bodies, {len(m.joints)} joints, {len(m.morphs)} morphs')
 
 
+def redye(name, out_dir=None):
+    """A built model's hair dyed again from its donors' sheets, nothing else touched:
+    for a change to the dye alone, or when the host is not at hand for a rebuild.
+
+        python3 tools/zzz2pmx/hairmix.py makima --redye [out-dir]
+
+    Every sheet carrying the old tag takes the new one (the iris keeps its pixels)."""
+    s = MIXES[name]
+    tag = _tag(s)
+    out_dir = out_dir or M + name
+    path = os.path.join(out_dir, name + '.pmx')
+    m = PMX(path)
+    old = None
+    for p in s['pieces']:
+        x = next(x for x in m.materials if x['name'] == p['name'])
+        rel = m.textures[x['tex']].replace('\\', '/')
+        old = re.search(r'_([0-9a-f]{6})\.png$', rel).group(1)
+        d = PMX(p['src'])
+        dx = next(x for x in d.materials if x['name'] == p['mat'])
+        src = os.path.join(os.path.dirname(p['src']), d.textures[dx['tex']].replace('\\', '/'))
+        stem, ext = os.path.splitext(p['sheet'])
+        shutil.copyfile(src, os.path.join(out_dir, 'textures', f'{stem}_{tag}{ext}'))
+    for i, t in enumerate(m.textures):
+        if old != tag and old in t:
+            new = t.replace(old, tag)
+            a, b = (os.path.join(out_dir, n.replace('\\', '/')) for n in (t, new))
+            if os.path.exists(a):
+                if os.path.exists(b):
+                    os.remove(a)
+                else:
+                    os.rename(a, b)
+            m.textures[i] = new
+    write_pmx(path, m)
+    recolor(path, s['recolor'], s['ramp'], s['median'], sheen=s.get('sheen'), smooth=s.get('smooth', ()), detail=s.get('detail'))
+    print(f'{path}: hair sheets *_{tag}.png' + (f' (were *_{old})' if old != tag else ''))
+
+
 if __name__ == '__main__':
-    main(sys.argv[1] if len(sys.argv) > 1 else 'makima', sys.argv[2] if len(sys.argv) > 2 else None)
+    args = [a for a in sys.argv[1:] if a != '--redye']
+    (redye if '--redye' in sys.argv else main)(args[0] if args else 'makima', args[1] if len(args) > 1 else None)

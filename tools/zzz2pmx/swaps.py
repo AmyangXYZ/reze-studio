@@ -136,7 +136,7 @@ SWAPS = {
                             scale=lambda m: neck_scale(m)),
     # Makima: her head (hairmix.py makima, built first) on 塞尔凯特's body; 塞尔凯特's
     # braid tie rides the braid that comes off
-    'makima': dict(host=M + '塞尔凯特2.0 2/塞尔凯特3.0.pmx', head=M + '_makima_head/makima.pmx',
+    'makima': dict(host=M + '塞尔凯特2.0/塞尔凯特3.0.pmx', head=M + '_makima_head/makima.pmx',
                    pre=[makima_head], post=[gone(M + '_makima_head')],
                    take=['脸', '口腔', '舌头', '牙齿', '眉毛', '眼白', '眼睛', '眼睛_高光', '表情',
                          'hair_front', 'hair_braid'],
